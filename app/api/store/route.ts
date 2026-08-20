@@ -14,7 +14,7 @@ export async function GET(request: Request) {
   try {
     const actor = await actorFrom(request);
     const db = d1();
-    const [productsResult, logsResult, pickingResult, usersResult, pogResult] = await Promise.all([
+    const [productsResult, logsResult, pickingResult, usersResult, pogResult, lineConfigsResult] = await Promise.all([
       db.prepare("SELECT id,sku,barcode,name,line,side,bay,price,stock,loss,exp_date AS expDate,updated_at AS updatedAt FROM products ORDER BY CAST(line AS INTEGER),name").all(),
       db.prepare("SELECT id,action,user_id AS userId,user_name AS userName,created_at AS createdAt FROM logs ORDER BY created_at DESC LIMIT 80").all(),
       db.prepare(`SELECT p.id,p.sku,p.barcode,p.name,p.line,p.side,p.bay,p.price,p.stock,p.loss,p.exp_date AS expDate,
@@ -22,8 +22,9 @@ export async function GET(request: Request) {
         WHERE i.user_id=? ORDER BY i.created_at`).bind(actor.userId).all(),
       db.prepare("SELECT user_id AS userId,email,name,role,created_at AS createdAt FROM roles ORDER BY created_at").all(),
       db.prepare("SELECT id,line,side,file_name AS fileName,mime_type AS mimeType,updated_at AS updatedAt FROM pog_files ORDER BY line,side").all(),
+      db.prepare("SELECT line,name,color,logo,updated_at AS updatedAt FROM line_configs ORDER BY CAST(line AS INTEGER)").all(),
     ]);
-    return Response.json({ actor, products: productsResult.results, logs: logsResult.results, picking: pickingResult.results, users: usersResult.results, pogFiles: pogResult.results });
+    return Response.json({ actor, products: productsResult.results, logs: logsResult.results, picking: pickingResult.results, users: usersResult.results, pogFiles: pogResult.results, lineConfigs: lineConfigsResult.results });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Không thể tải dữ liệu" }, { status: 500 });
   }
@@ -142,6 +143,22 @@ export async function POST(request: Request) {
       if (!["ADMIN","MANAGER","STAFF"].includes(role)) return Response.json({ error: "Quyền không hợp lệ" }, { status: 400 });
       await db.prepare("UPDATE roles SET role=? WHERE user_id=?").bind(role,asText(payload.userId)).run();
       await addAudit(actor, `Phân quyền người dùng thành ${role}`);
+      return Response.json({ ok: true });
+    }
+
+    if (action === "updateLineConfig") {
+      if (!canManage(actor.role)) return Response.json({ error: "Cần quyền Manager hoặc Admin" }, { status: 403 });
+      const lineConfig = (payload.lineConfig || {}) as Record<string, unknown>;
+      const line = cleanLine(lineConfig.line);
+      const name = asText(lineConfig.name).slice(0, 48);
+      const color = asText(lineConfig.color).toUpperCase();
+      const logo = asText(lineConfig.logo).slice(0, 36);
+      if (!name) return Response.json({ error: "Tên Line là bắt buộc" }, { status: 400 });
+      if (!/^#[0-9A-F]{6}$/.test(color)) return Response.json({ error: "Màu cần theo định dạng #RRGGBB" }, { status: 400 });
+      await db.prepare(`INSERT INTO line_configs (line,name,color,logo,updated_at) VALUES (?,?,?,?,?)
+        ON CONFLICT(line) DO UPDATE SET name=excluded.name,color=excluded.color,logo=excluded.logo,updated_at=excluded.updated_at`)
+        .bind(line,name,color,logo,Date.now()).run();
+      await addAudit(actor, `Cập nhật layout Line ${line}: ${name}`);
       return Response.json({ ok: true });
     }
 

@@ -52,3 +52,11 @@ export const pogFiles = sqliteTable("pog_files", {
   mimeType: text("mime_type").notNull(),
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [uniqueIndex("idx_pog_line_side").on(table.line, table.side)]);
+
+export const lineConfigs = sqliteTable("line_configs", {
+  line: text("line").primaryKey(),
+  name: text("name").notNull(),
+  color: text("color").notNull(),
+  logo: text("logo").notNull().default(""),
+  updatedAt: integer("updated_at").notNull(),
+});

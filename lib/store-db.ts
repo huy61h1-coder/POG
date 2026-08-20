@@ -12,6 +12,16 @@ export function files() {
   return env.FILES;
 }
 
+const defaultLineConfigs = [
+  ["01","Souvenir","#dfb100",""],["02","Choco","#c00057",""],["03","Fruit","#c8185d",""],["04","Confec","#bf0d59",""],
+  ["05","Milk","#62676a",""],["06","Milk","#62676a",""],["07","Kid","#bf0d59",""],["08","Kid","#bf0d59",""],
+  ["09","Nonfood","#07978d",""],["10","Home Coordy","#214ab5","TOPVALU"],["11","Home Coordy","#214ab5","TOPVALU"],["12","Household","#214ab5",""],
+  ["13","Household","#214ab5",""],["14","Nonfood","#07978d",""],["15","Nonfood","#07978d",""],["16","Nonfood","#07978d",""],
+  ["17","Beer Liquor","#62676a",""],["18","Tea Drinks","#dfb100",""],["19","Coffee","#dfb100",""],["20","Topvalu","#b00059","TOPVALU"],
+  ["21","Topvalu","#b00059","TOPVALU"],["22","Asia","#62676a",""],["23","Asia","#62676a",""],["24","Noodles","#62676a",""],
+  ["25","Rice","#62676a",""],["26","Sauces","#62676a",""],["27","Spices","#62676a",""],["28","Sea Food","#62676a",""]
+] as const;
+
 export async function ensureSchema() {
   const db = d1();
   await db.batch([
@@ -44,7 +54,16 @@ export async function ensureSchema() {
       updated_at INTEGER NOT NULL
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_pog_line_side ON pog_files(line, side)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS line_configs (
+      line TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL,
+      logo TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
+    )`),
   ]);
+
+  const now = Date.now();
+  await db.batch(defaultLineConfigs.map(([line, name, color, logo]) => db.prepare(
+    "INSERT OR IGNORE INTO line_configs (line,name,color,logo,updated_at) VALUES (?,?,?,?,?)"
+  ).bind(line, name, color, logo, now)));
 
   const count = await db.prepare("SELECT COUNT(*) AS total FROM products").first<{ total: number }>();
   if (!count?.total) {

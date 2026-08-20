@@ -8,6 +8,13 @@
       "when": 1787241500000,
       "tag": "0000_fulfillment_smartops",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787242500000,
+      "tag": "0001_line_configs",
+      "breakpoints": true
     }
   ]
 }
