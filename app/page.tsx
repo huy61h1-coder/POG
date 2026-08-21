@@ -11,7 +11,7 @@ type Audit = { id:string; action:string; userId:string; userName:string; created
 type UserRole = { userId:string; email:string; name:string; role:Role; createdAt:number };
 type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; updatedAt:number };
 type LineConfig = { line:string; name:string; color:string; logo:string; updatedAt?:number };
-type StoreData = { actor:Actor; products:Product[]; logs:Audit[]; picking:PickItem[]; users:UserRole[]; pogFiles:PogFile[]; lineConfigs:LineConfig[] };
+type StoreData = { actor:Actor; products:Product[]; logs:Audit[]; picking:PickItem[]; users:UserRole[]; pogFiles:PogFile[]; lineConfigs?:LineConfig[] };
 
 const aisleNames: Record<string,string> = {
   "01":"Souvenir","02":"Chocolate","03":"Fruit","04":"Confectionery","05":"Milk","06":"Milk","07":"Kids","08":"Kids",
@@ -168,7 +168,7 @@ export default function Home() {
         <nav className="side-nav">{menu.map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>setTab(item.id)}><span>{item.icon}</span>{item.label}{item.id==="ORDER"&&data.picking.length>0?<b>{data.picking.length}</b>:null}</button>)}</nav>
         <section className="ops-content">
           {tab==="DASHBOARD"&&<Dashboard products={products} logs={data.logs} totals={{outCount,lowCount,totalLoss,expiring}} onGo={setTab}/>}
-          {tab==="MAP"&&<MapView products={products} lineConfigs={data.lineConfigs} query={query} canManage={canManage(data.actor.role)} onOpen={(line,side)=>setPogModal({line,side})} onEdit={(lineConfig)=>setLineModal(lineConfig)}/>}
+          {tab==="MAP"&&<MapView products={products} lineConfigs={data.lineConfigs||[]} query={query} canManage={canManage(data.actor.role)} onOpen={(line,side)=>setPogModal({line,side})} onEdit={(lineConfig)=>setLineModal(lineConfig)}/>}
           {tab==="PRODUCTS"&&<ProductsView products={filtered} role={data.actor.role} onAdd={()=>setProductModal({...emptyProduct})} onEdit={(p)=>setProductModal({...p})} onDelete={(p)=>void mutate("deleteProduct",{id:p.id})} onMap={openProductOnMap} onPick={(p)=>void mutate("addPick",{productId:p.id})} onExport={exportCsv} onImport={()=>csvRef.current?.click()}/>}
           {tab==="STOCK"&&<CheckGrid kind="stock" products={filtered} onAdjust={(p,d)=>void mutate("adjustStock",{id:p.id,delta:d})}/>}
           {tab==="LOSS"&&<CheckGrid kind="loss" products={filtered} onAdjust={(p,d)=>void mutate("adjustLoss",{id:p.id,delta:d})}/>}
