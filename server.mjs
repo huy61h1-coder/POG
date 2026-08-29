@@ -41,9 +41,129 @@ function asText(value, fallback = "") { return typeof value === "string" ? value
 function asInt(value, fallback = 0) { const n = Number(value); return Number.isFinite(n) ? Math.trunc(n) : fallback; }
 function cleanLine(value) { return asText(value, "01").replace(/\D/g, "").padStart(2, "0").slice(-2); }
 function canManage(role) { return role === "ADMIN" || role === "MANAGER"; }
+function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase(); }
 function audit(state, actor, action) {
   state.logs.unshift({ id: randomUUID(), action, userId: actor.userId, userName: actor.name, createdAt: Date.now() });
   state.logs = state.logs.slice(0, 500);
+}
+
+const aiRateWindows = new Map();
+const aiIntentGroups = [
+  { triggers:["lau","hotpot"], keywords:["rau","nam","thit","hai san","tom","ca","mi","bun","sot","nuoc dung","do uong"] },
+  { triggers:["nuong","bbq"], keywords:["thit","hai san","sot","gia vi","do uong","giay","khay"] },
+  { triggers:["bua sang","an sang"], keywords:["sua","banh","ngu coc","ca phe","tra","trung"] },
+  { triggers:["sinh nhat","tiec"], keywords:["banh","keo","chocolate","nuoc","tra","ca phe","trang tri"] },
+  { triggers:["du lich","da ngoai","picnic"], keywords:["nuoc","banh","mi","do hop","khan","tui","nonfood"] },
+];
+
+function availableProducts(products) {
+  const today = new Date().toISOString().slice(0,10);
+  return products.filter((product) => product.stock > 0 && (!product.expDate || product.expDate >= today));
+}
+
+function intentTerms(query) {
+  const normalized = normalizeText(query);
+  const terms = new Set(normalized.split(/[^a-z0-9]+/).filter((term) => term.length > 1));
+  for (const group of aiIntentGroups) if (group.triggers.some((trigger) => normalized.includes(trigger))) group.keywords.forEach((term) => terms.add(term));
+  return [...terms];
+}
+
+function rankedProducts(query, products) {
+  const terms = intentTerms(query);
+  return availableProducts(products).map((product) => {
+    const haystack = normalizeText([product.name,product.sku,product.barcode,product.line,product.side].join(" "));
+    const score = terms.reduce((total,term) => total + (haystack.includes(term) ? (term.length > 3 ? 5 : 2) : 0),0) + Math.min(2,product.stock/20);
+    return { product, score };
+  }).sort((a,b) => b.score-a.score || b.product.stock-a.product.stock);
+}
+
+function localProductSuggestions(query, products, notice = "") {
+  const ranked = rankedProducts(query, products);
+  const matching = ranked.filter((entry) => entry.score > 2.1);
+  const selected = (matching.length ? matching : ranked).slice(0,6);
+  return {
+    mode:"local",
+    model:null,
+    summary:selected.length
+      ? "Đã chọn "+selected.length+" sản phẩm có sẵn phù hợp nhất với nhu cầu của bạn."
+      : "Hiện chưa có sản phẩm còn hàng phù hợp trong danh sách.",
+    notice,
+    items:selected.map(({product}) => ({
+      productId:product.id,sku:product.sku,name:product.name,line:product.line,side:product.side,bay:product.bay,
+      price:product.price,stock:product.stock,quantity:1,
+      reason:"Phù hợp theo tên hàng, nhóm Line và lượng tồn hiện có."
+    }))
+  };
+}
+
+function takeAiQuota(userId) {
+  const now=Date.now(),windowMs=60_000,limit=Math.max(1,Math.min(30,asInt(process.env.AI_RATE_LIMIT,8)));
+  const recent=(aiRateWindows.get(userId)||[]).filter((time) => now-time<windowMs);
+  if(recent.length>=limit)return Math.max(1,Math.ceil((windowMs-(now-recent[0]))/1000));
+  recent.push(now);aiRateWindows.set(userId,recent);return 0;
+}
+
+async function openAiProductSuggestions(query, products) {
+  const apiKey=asText(process.env.OPENAI_API_KEY);
+  if(!apiKey)return localProductSuggestions(query,products,"Chưa cấu hình khóa AI; ứng dụng đang dùng bộ phân tích nội bộ.");
+  const model=asText(process.env.OPENAI_MODEL,"gpt-5.4-mini");
+  const baseUrl=asText(process.env.OPENAI_BASE_URL,"https://api.openai.com/v1").replace(/\/+$/,"");
+  const catalogLimit=Math.max(50,Math.min(1000,asInt(process.env.AI_PRODUCT_LIMIT,800)));
+  const catalog=rankedProducts(query,products).slice(0,catalogLimit).map(({product}) => ({
+    productId:product.id,sku:product.sku,name:product.name,line:product.line,side:product.side,bay:product.bay,
+    price:product.price,stock:product.stock,expDate:product.expDate
+  }));
+  if(!catalog.length)return localProductSuggestions(query,products);
+
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),20_000);
+  try {
+    const response=await fetch(baseUrl+"/responses",{
+      method:"POST",signal:controller.signal,
+      headers:{"content-type":"application/json","authorization":"Bearer "+apiKey},
+      body:JSON.stringify({
+        model,store:false,max_output_tokens:1200,
+        instructions:[
+          "Bạn là trợ lý chọn sản phẩm cho nhân viên Fulfillment.",
+          "Chỉ được chọn productId có trong DANH_SACH_SAN_PHAM; tuyệt đối không tự tạo sản phẩm.",
+          "Danh sách đã được lọc còn tồn và chưa hết hạn. Ưu tiên một bộ sản phẩm hữu ích, tránh trùng công dụng.",
+          "Trả lời bằng tiếng Việt. Lý do ngắn gọn, cụ thể và không quá 120 ký tự.",
+          "Số lượng là số nguyên từ 1 đến 20. Trả tối đa 8 sản phẩm."
+        ].join("\n"),
+        input:"NHU_CAU: "+query+"\nDANH_SACH_SAN_PHAM:\n"+JSON.stringify(catalog),
+        text:{format:{
+          type:"json_schema",name:"fulfillment_product_recommendations",strict:true,
+          schema:{
+            type:"object",additionalProperties:false,
+            properties:{
+              summary:{type:"string"},
+              items:{type:"array",maxItems:8,items:{
+                type:"object",additionalProperties:false,
+                properties:{productId:{type:"string"},quantity:{type:"integer",minimum:1,maximum:20},reason:{type:"string"}},
+                required:["productId","quantity","reason"]
+              }}
+            },
+            required:["summary","items"]
+          }
+        }}
+      })
+    });
+    if(!response.ok)throw new Error("OpenAI status "+response.status);
+    const payload=await response.json();
+    const outputText=asText(payload.output_text)||asText(payload.output?.flatMap((item)=>item.content||[]).find((item)=>item.type==="output_text")?.text);
+    if(!outputText)throw new Error("OpenAI returned no output text");
+    const parsed=JSON.parse(outputText),byId=new Map(catalog.map((product)=>[product.productId,product])),seen=new Set();
+    const items=(Array.isArray(parsed.items)?parsed.items:[]).flatMap((item)=>{
+      const product=byId.get(asText(item.productId));
+      if(!product||seen.has(product.productId))return [];
+      seen.add(product.productId);
+      return [{...product,quantity:Math.max(1,Math.min(20,asInt(item.quantity,1))),reason:asText(item.reason,"Phù hợp với nhu cầu đã nhập.").slice(0,160)}];
+    });
+    if(!items.length)return localProductSuggestions(query,products,"AI chưa tìm được kết quả hợp lệ; đã chuyển sang phân tích nội bộ.");
+    return {mode:"ai",model,summary:asText(parsed.summary,"Đã tìm thấy "+items.length+" sản phẩm phù hợp.").slice(0,300),notice:"",items};
+  } catch(error) {
+    console.error("AI suggestion fallback:",error instanceof Error?error.message:"unknown error");
+    return localProductSuggestions(query,products,"AI tạm thời chưa phản hồi; kết quả dưới đây được phân tích nội bộ.");
+  } finally { clearTimeout(timeout); }
 }
 
 class StateStore {
@@ -182,6 +302,20 @@ app.post("/api/store", async (req, res, next) => {
       return fail("Thao tác không hợp lệ");
     });
     res.status(result.status||200).json(result);
+  } catch (error) { next(error); }
+});
+
+app.post("/api/ai/suggest", async (req, res, next) => {
+  try {
+    const query=asText(req.body?.query).slice(0,500);
+    if(query.length<2)return res.status(400).json({error:"Hãy mô tả nhu cầu bằng ít nhất 2 ký tự."});
+    if(asText(process.env.OPENAI_API_KEY)){
+      const retryAfter=takeAiQuota(req.fulfillmentUserId);
+      if(retryAfter){res.set("Retry-After",String(retryAfter));return res.status(429).json({error:"Bạn đang phân tích quá nhanh. Vui lòng thử lại sau "+retryAfter+" giây."});}
+    }
+    const state=await store.read();
+    const result=await openAiProductSuggestions(query,state.products);
+    res.set("Cache-Control","no-store").json({...result,productCount:state.products.length});
   } catch (error) { next(error); }
 });
 
