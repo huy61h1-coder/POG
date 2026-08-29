@@ -25,7 +25,7 @@ npm run build
 4. Configure the environment variable `DATABASE_URL` with the PostgreSQL connection string.
 5. Set build command to `npm run build` and start command to `npm run start`.
 
-The app creates its `fulfillment_state` table automatically on first start. Uploaded POG images/PDFs are stored in `data/uploads`; ensure the application directory has write permission. When `DATABASE_URL` is omitted, the app uses `data/store.json` only for local demo use.
+The app creates its `fulfillment_state` table automatically on first start. Set `UPLOAD_DIR` to a persistent shared volume for uploaded POG images/PDFs; a temporary application filesystem can be cleared during redeploy. When `DATABASE_URL` is omitted, the app uses `DATA_DIR/store.json` only for local demo use.
 
 ## Main capabilities
 

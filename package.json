@@ -8,8 +8,8 @@
   "scripts": {
     "dev": "node server.mjs",
     "build": "vite build",
-    "start": "NODE_ENV=production node server.mjs",
-    "test": "npm run build",
+    "start": "node server.mjs --production",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
