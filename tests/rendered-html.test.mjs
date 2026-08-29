@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { strToU8, zipSync } from "fflate";
 
 const root=fileURLToPath(new URL("..",import.meta.url));
 const port=32000+(process.pid%1000);
@@ -12,6 +13,19 @@ const aiPort=33000+(process.pid%1000);
 const origin=`http://127.0.0.1:${port}`;
 const dataDir=await mkdtemp(path.join(tmpdir(),"fulfillment-test-"));
 let server,aiServer;
+
+function createXlsx(rows){
+  const escape=(value)=>String(value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  const sheetRows=rows.map((row,rowIndex)=>'<row r="'+(rowIndex+1)+'">'+row.map((value,columnIndex)=>'<c r="'+String.fromCharCode(65+columnIndex)+(rowIndex+1)+'" t="inlineStr"><is><t xml:space="preserve">'+escape(value)+'</t></is></c>').join("")+'</row>').join("");
+  const files={
+    "[Content_Types].xml":'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+    "_rels/.rels":'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    "xl/workbook.xml":'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Master" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    "xl/_rels/workbook.xml.rels":'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+    "xl/worksheets/sheet1.xml":'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'+sheetRows+'</sheetData></worksheet>',
+  };
+  return zipSync(Object.fromEntries(Object.entries(files).map(([name,content])=>[name,strToU8(content)])),{level:0});
+}
 
 async function waitForServer(){
   let lastError="";
@@ -56,17 +70,49 @@ try{
   assert.match(page.headers.get("content-type")||"",/^text\/html/);
   assert.deepEqual(await health.json(),{ok:true,storage:"local-json"});
 
-  const first=await fetch(origin+"/api/store");
-  const cookie=(first.headers.get("set-cookie")||"").split(";")[0];
+  const anonymous=await fetch(origin+"/api/store");
+  assert.equal(anonymous.status,401);
+  assert.equal((await anonymous.json()).setupRequired,true);
+  const setupResponse=await fetch(origin+"/api/auth/setup",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name:"Quản trị kiểm thử",username:"admin.test",password:"StrongPass123"})});
+  assert.equal(setupResponse.status,200);
+  const cookie=(setupResponse.headers.get("set-cookie")||"").split(";")[0];
+  assert.match(cookie,/^fulfillment_session=/);
+  const first=await fetch(origin+"/api/store",{headers:{cookie}});
   const data=await first.json();
   assert.equal(data.actor.role,"ADMIN");
+  assert.equal(data.actor.username,"admin.test");
+  assert.equal(data.users.length,1);
   assert.equal(data.products.length,3);
+  assert.equal(data.products[0].divisionName,"HOME & LIVING");
+  assert.equal(data.products[0].supplierBarcode,"45497410531914");
   const product=data.products[0],headers={"content-type":"application/json",cookie};
   await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"addPick",productId:product.id,quantity:2})});
   await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"addPick",productId:product.id,quantity:1})});
   const updated=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
   assert.equal(updated.actor.userId,data.actor.userId);
   assert.equal(updated.picking[0].quantity,3);
+
+  const wrongLogin=await fetch(origin+"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({username:"admin.test",password:"wrong-password"})});
+  assert.equal(wrongLogin.status,401);
+  const createStaff=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"createAccount",account:{name:"Nhân viên kiểm thử",username:"staff.test",password:"StaffPass123",role:"STAFF"}})});
+  assert.equal(createStaff.status,200);
+  const staffAccount=(await createStaff.json()).account;
+  const staffLogin=await fetch(origin+"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({username:"staff.test",password:"StaffPass123"})});
+  assert.equal(staffLogin.status,200);
+  const staffCookie=(staffLogin.headers.get("set-cookie")||"").split(";")[0];
+  const forbiddenDelete=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"deleteProduct",id:product.id})});
+  assert.equal(forbiddenDelete.status,403);
+  const promoteStaff=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:staffAccount.userId,role:"MANAGER"}})});
+  assert.equal(promoteStaff.status,200);
+  const selfDemote=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:data.actor.userId,role:"STAFF"}})});
+  assert.equal(selfDemote.status,400);
+  const managerCannotCreate=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"createAccount",account:{name:"Không hợp lệ",username:"blocked.user",password:"BlockedPass123",role:"STAFF"}})});
+  assert.equal(managerCannotCreate.status,403);
+
+  const invalidMaster=new FormData();
+  invalidMaster.set("file",new Blob(["not-an-xlsx"],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"master.xlsx");
+  const invalidMasterResponse=await fetch(origin+"/api/master-data/import",{method:"POST",headers:{cookie},body:invalidMaster});
+  assert.equal(invalidMasterResponse.status,400);
 
   const invalidAi=await fetch(origin+"/api/ai/suggest",{method:"POST",headers,body:JSON.stringify({query:""})});
   assert.equal(invalidAi.status,400);
@@ -88,8 +134,47 @@ try{
   assert.ok(fallbackResult.items.length>0);
   assert.ok(fallbackResult.items.every((item)=>item.stock>0&&item.productId!=="p3"));
 
+  const masterHeaders=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"];
+  const workbook=createXlsx([masterHeaders,["10531914","SẢN PHẨM CẬP NHẬT TỪ EXCEL","18","FOOD","1801","BEVERAGE","490000000001","18","TEA DRINKS"],["00000999","SẢN PHẨM MỚI","03","FOOD","0301","FRUIT","490000000002","03","FRUIT"]]);
+  const masterForm=new FormData();
+  masterForm.set("file",new Blob([workbook],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"master-data.xlsx");
+  const masterResponse=await fetch(origin+"/api/master-data/import",{method:"POST",headers:{cookie:staffCookie},body:masterForm});
+  assert.equal(masterResponse.status,200);
+  const masterResult=await masterResponse.json();
+  assert.equal(masterResult.created,1);
+  assert.equal(masterResult.updated,1);
+  assert.equal(masterResult.skipped,0);
+  const afterMaster=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  const preserved=afterMaster.products.find((item)=>item.id==="p1");
+  assert.equal(preserved.name,"SẢN PHẨM CẬP NHẬT TỪ EXCEL");
+  assert.equal(preserved.supplierBarcode,"490000000001");
+  assert.equal(preserved.line,"18");
+  assert.equal(preserved.stock,5);
+  assert.equal(preserved.bay,3);
+  assert.equal(preserved.price,450000);
+  assert.equal(afterMaster.picking[0].productId,undefined);
+  assert.equal(afterMaster.picking[0].id,"p1");
+  assert.equal(afterMaster.picking[0].quantity,3);
+  assert.equal(afterMaster.products.length,4);
+  assert.doesNotMatch(JSON.stringify(afterMaster),/passwordHash|tokenHash|sessions/);
+  const importedProduct=afterMaster.products.find((item)=>item.sku==="00000999");
+  const editProduct=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"upsertProduct",product:{...importedProduct,name:"SẢN PHẨM ĐÃ SỬA"}})});
+  assert.equal(editProduct.status,200);
+  const deleteProduct=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"deleteProduct",id:importedProduct.id})});
+  assert.equal(deleteProduct.status,200);
+  const afterDelete=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  assert.equal(afterDelete.products.some((item)=>item.id===importedProduct.id),false);
+  const disableManager=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:staffAccount.userId,active:false}})});
+  assert.equal(disableManager.status,200);
+  assert.equal((await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).status,401);
+
+  const logoutResponse=await fetch(origin+"/api/auth/logout",{method:"POST",headers:{cookie}});
+  assert.equal(logoutResponse.status,200);
+  assert.match(logoutResponse.headers.get("set-cookie")||"",/Max-Age=0/);
+  assert.equal((await fetch(origin+"/api/store",{headers:{cookie}})).status,401);
+
   const missing=await fetch(origin+"/api/does-not-exist");
   assert.equal(missing.status,404);
   assert.match(missing.headers.get("content-type")||"",/^application\/json/);
-  console.log("Smoke tests passed: page, health, identity, picking, grounded AI, AI fallback, API 404");
+  console.log("Smoke tests passed: page, health, identity, picking, grounded AI, AI fallback, Excel import, API 404");
 }finally{await stopServer()}

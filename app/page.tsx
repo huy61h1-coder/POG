@@ -5,15 +5,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "ADMIN" | "MANAGER" | "STAFF";
 type Tab = "DASHBOARD" | "MAP" | "PRODUCTS" | "STOCK" | "LOSS" | "DATE" | "ORDER" | "SUGGEST";
-type Product = { id:string; sku:string; barcode:string; name:string; line:string; side:"A"|"B"; bay:number; price:number; stock:number; loss:number; expDate:string; updatedAt?:number };
+type Product = { id:string; sku:string; name:string; division:string; divisionName:string; department:string; departmentName:string; supplierBarcode:string; barcode:string; line:string; lineName:string; side:"A"|"B"; bay:number; price:number; stock:number; loss:number; expDate:string; updatedAt?:number };
 type PickItem = Product & { quantity:number; picked:boolean|number };
-type Actor = { userId:string; email:string; name:string; role:Role };
+type Actor = { userId:string; username:string; email:string; name:string; role:Role; active:boolean };
 type Audit = { id:string; action:string; userId:string; userName:string; createdAt:number };
-type UserRole = { userId:string; email:string; name:string; role:Role; createdAt:number };
+type UserRole = { userId:string; username:string; email:string; name:string; role:Role; active:boolean; createdAt:number; updatedAt?:number };
 type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; updatedAt:number };
 type LineConfig = { line:string; name:string; color:string; logo:string; updatedAt?:number };
 type AiSuggestion = { productId:string; sku:string; name:string; line:string; side:"A"|"B"; bay:number; price:number; stock:number; quantity:number; reason:string };
 type AiSuggestionResult = { mode:"ai"|"local"; model:string|null; summary:string; notice:string; items:AiSuggestion[]; productCount:number };
+type MasterImportResult = { fileName:string; created:number; updated:number; unchanged:number; imported:number; totalProducts:number; skipped:number; duplicates:number; issues:Array<{row:number;reason:string}> };
 type StoreData = { actor:Actor; products:Product[]; logs:Audit[]; picking:PickItem[]; users:UserRole[]; pogFiles:PogFile[]; lineConfigs?:LineConfig[] };
 
 const aisleNames: Record<string,string> = {
@@ -27,7 +28,7 @@ const menu: Array<{id:Tab;label:string;icon:string}> = [
   {id:"STOCK",label:"Kiểm tồn",icon:"□"},{id:"LOSS",label:"Thất thoát",icon:"△"},{id:"DATE",label:"Hạn dùng",icon:"◷"},
   {id:"ORDER",label:"Đơn soạn",icon:"✓"},{id:"SUGGEST",label:"Gợi ý",icon:"✦"}
 ];
-const emptyProduct: Product = { id:"",sku:"",barcode:"",name:"",line:"01",side:"A",bay:1,price:0,stock:0,loss:0,expDate:"" };
+const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"",barcode:"",line:"01",lineName:"SOUVENIR",side:"A",bay:1,price:0,stock:0,loss:0,expDate:"" };
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
@@ -46,6 +47,7 @@ function StockBadge({stock}:{stock:number}) {
 
 export default function Home() {
   const [data,setData] = useState<StoreData|null>(null);
+  const [authMode,setAuthMode] = useState<"login"|"setup"|null>(null);
   const [tab,setTab] = useState<Tab>("DASHBOARD");
   const [query,setQuery] = useState("");
   const [stockFilter,setStockFilter] = useState<"all"|"available"|"low"|"out">("all");
@@ -63,26 +65,29 @@ export default function Home() {
   const [suggestResult,setSuggestResult] = useState<AiSuggestionResult|null>(null);
   const [suggestBusy,setSuggestBusy] = useState(false);
   const [suggestError,setSuggestError] = useState("");
+  const [masterImport,setMasterImport] = useState<MasterImportResult|null>(null);
   const [theme,setTheme] = useState(()=>{if(typeof window==="undefined")return "aeon";const saved=window.localStorage.getItem("fulfillment-theme");return ["aeon","aeon-soft","graphite"].includes(saved||"")?saved!:"aeon"});
-  const csvRef = useRef<HTMLInputElement>(null);
+  const excelRef = useRef<HTMLInputElement>(null);
   const pogRef = useRef<HTMLInputElement>(null);
 
   const loadData = useCallback(async (quiet=false) => {
     if (!quiet) setBusy(true);
     try {
       const response = await fetch("/api/store", { cache:"no-store" });
-      const payload = await response.json() as StoreData & {error?:string};
+      const payload = await response.json() as StoreData & {error?:string;setupRequired?:boolean};
+      if(response.status===401){setData(null);setAuthMode(payload.setupRequired?"setup":"login");setError("");return;}
       if (!response.ok) throw new Error(payload.error || "Không thể tải dữ liệu");
-      setData(payload); setError(""); setLastSyncedAt(Date.now());
+      setData(payload); setAuthMode(null); setError(""); setLastSyncedAt(Date.now());
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Không thể tải dữ liệu"); }
     finally { if (!quiet) setBusy(false); }
   },[]);
 
   useEffect(() => {
+    if(authMode)return;
     const initial = window.setTimeout(() => void loadData(),0);
     const timer = window.setInterval(() => void loadData(true),15000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
-  },[loadData]);
+  },[loadData,authMode]);
   useEffect(() => { document.documentElement.dataset.theme=theme; window.localStorage.setItem("fulfillment-theme",theme); },[theme]);
   useEffect(() => { if (!toast) return; const timer=window.setTimeout(()=>setToast(""),2600); return ()=>window.clearTimeout(timer); },[toast]);
 
@@ -90,7 +95,8 @@ export default function Home() {
     setBusy(true);
     try {
       const response = await fetch("/api/store",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,...payload})});
-      const result = await response.json() as {error?:string};
+      const result = await response.json() as {error?:string;setupRequired?:boolean};
+      if(response.status===401){setData(null);setAuthMode(result.setupRequired?"setup":"login");throw new Error("Phiên đăng nhập đã hết hạn");}
       if (!response.ok) throw new Error(result.error || "Thao tác thất bại");
       await loadData(true); setToast("Đã cập nhật thành công");
       return true;
@@ -98,11 +104,28 @@ export default function Home() {
     finally { setBusy(false); }
   };
 
+  const authenticate = async (credentials:{username:string;password:string;name?:string}) => {
+    if(!authMode)return;
+    setBusy(true);setError("");
+    try {
+      const response=await fetch(authMode==="setup"?"/api/auth/setup":"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(credentials)});
+      const result=await response.json() as {error?:string};
+      if(!response.ok)throw new Error(result.error||"Không thể đăng nhập");
+      await loadData(true);
+    } catch(cause){setError(cause instanceof Error?cause.message:"Không thể đăng nhập");}
+    finally{setBusy(false);}
+  };
+
+  const logout = async () => {
+    setBusy(true);
+    try{await fetch("/api/auth/logout",{method:"POST"});}finally{setSettingsOpen(false);setData(null);setAuthMode("login");setBusy(false);}
+  };
+
   const products = useMemo(()=>data?.products||[],[data?.products]);
   const filtered = useMemo(() => {
     const needle=normalize(query);
     return products.filter((p) => {
-      const hit=!needle || normalize([p.name,p.sku,p.barcode,p.line,p.side].join(" ")).includes(needle);
+      const hit=!needle || normalize([p.name,p.sku,p.barcode,p.supplierBarcode,p.division,p.divisionName,p.department,p.departmentName,p.line,p.lineName,p.side].join(" ")).includes(needle);
       const stockHit=stockFilter==="all" || (stockFilter==="available" ? p.stock>0 : stockFilter==="low" ? p.stock>0&&p.stock<10 : p.stock===0);
       const lineHit=lineFilter==="all" || p.line===lineFilter;
       return hit && stockHit && lineHit;
@@ -115,30 +138,33 @@ export default function Home() {
   const expiring = products.filter((p)=>expiryStatus(p.expDate).tone==="warning"||expiryStatus(p.expDate).tone==="danger").length;
   const pickedCount = (data?.picking||[]).filter((p)=>Boolean(p.picked)).length;
   const progress = data?.picking?.length ? Math.round(pickedCount/data.picking.length*100) : 0;
-  const pogProducts = pogModal ? products.filter((p)=>p.line===pogModal.line && p.side===pogModal.side && normalize(p.name+" "+p.sku+" "+p.barcode).includes(normalize(pogSearch))) : [];
+  const pogProducts = pogModal ? products.filter((p)=>p.line===pogModal.line && p.side===pogModal.side && normalize([p.name,p.sku,p.barcode,p.supplierBarcode,p.lineName].join(" ")).includes(normalize(pogSearch))) : [];
   const activePog = pogModal ? data?.pogFiles.find((file)=>file.id===pogModal.line+"_"+pogModal.side) : undefined;
   const availableLines = useMemo(()=>Array.from(new Set(products.map((p)=>p.line))).sort((a,b)=>Number(a)-Number(b)),[products]);
 
   const exportCsv = () => {
-    const headers=["SKU","Barcode","Name","Line","Side","Bay","Price","Stock","Loss","ExpDate"];
-    const rows=products.map((p)=>[p.sku,p.barcode,p.name,p.line,p.side,p.bay,p.price,p.stock,p.loss,p.expDate]);
+    const headers=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"];
+    const rows=products.map((p)=>[p.sku,p.name,p.division,p.divisionName,p.department,p.departmentName,p.supplierBarcode,p.line,p.lineName]);
     const csv="\uFEFF"+[headers,...rows].map((row)=>row.map((cell)=>'"'+String(cell).replace(/"/g,'""')+'"').join(",")).join("\n");
     const link=document.createElement("a"); link.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"})); link.download="MasterData_Fulfillment.csv"; link.click(); URL.revokeObjectURL(link.href);
   };
-  const parseCsv = (text:string) => {
-    const rows:Array<string[]> = []; let row:string[]=[]; let field=""; let quoted=false;
-    for(let i=0;i<text.length;i++){const char=text[i];if(char==='"'){if(quoted&&text[i+1]==='"'){field+='"';i++;}else quoted=!quoted;}else if(char===","&&!quoted){row.push(field);field="";}else if((char==="\n"||char==="\r")&&!quoted){if(char==="\r"&&text[i+1]==="\n")i++;row.push(field);if(row.some(Boolean))rows.push(row);row=[];field="";}else field+=char;}
-    row.push(field);if(row.some(Boolean))rows.push(row);
-    const heads=(rows.shift()||[]).map((h)=>normalize(h).replace(/\s/g,""));
-    return rows.map((values)=>{const get=(...names:string[])=>{const index=heads.findIndex((h)=>names.includes(h));return index>=0?values[index]||"":"";};return {sku:get("sku","mahang"),barcode:get("barcode","ean"),name:get("name","tensanpham","ten"),line:get("line","day"),side:get("side","mat"),bay:get("bay","ke"),price:get("price","gia"),stock:get("stock","ton"),loss:get("loss","haohut"),expDate:get("expdate","hsd")};});
-  };
-  const importCsv = async (file?:File) => {
-    if(!file)return; const rows=parseCsv(await file.text()); await mutate("importProducts",{products:rows}); if(csvRef.current)csvRef.current.value="";
+  const importExcel = async (file?:File) => {
+    if(!file)return;
+    setBusy(true);
+    try {
+      const form=new FormData();form.set("file",file);
+      const response=await fetch("/api/master-data/import",{method:"POST",body:form});
+      const result=await response.json() as MasterImportResult&{error?:string};
+      if(!response.ok)throw new Error(result.error||"Không thể nhập Master Data");
+      setMasterImport(result);await loadData(true);
+      setToast("Đã nhập "+result.imported+" SKU · "+result.created+" mới · "+result.updated+" cập nhật");
+    } catch(cause){setToast(cause instanceof Error?cause.message:"Không thể nhập Master Data");}
+    finally{setBusy(false);if(excelRef.current)excelRef.current.value="";}
   };
 
   const openProductOnMap = (product:Product) => { setPogModal({line:product.line,side:product.side,selectedId:product.id});setPogSearch(product.sku);setQuery(""); };
   const quickAdd = async (product:Product) => { if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}if(await mutate("addPick",{productId:product.id,quantity:1}))setQuery(""); };
-  const handleSearchEnter = () => { const needle=normalize(query);const exact=products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle);if(exact)void quickAdd(exact);else if(searchMatches[0])openProductOnMap(searchMatches[0]); };
+  const handleSearchEnter = () => { const needle=normalize(query);const exact=products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)void quickAdd(exact);else if(searchMatches[0])openProductOnMap(searchMatches[0]); };
   const uploadPog = async (file?:File) => {
     if(!file||!pogModal)return; setBusy(true);
     try { const form=new FormData();form.set("file",file);form.set("line",pogModal.line);form.set("side",pogModal.side);
@@ -163,6 +189,7 @@ export default function Home() {
   const openSuggested=(item:AiSuggestion)=>{const product=products.find((entry)=>entry.id===item.productId);if(product)openProductOnMap(product);else setToast("Sản phẩm không còn trong danh sách");};
   const addSuggested=async(item:AiSuggestion)=>{const product=products.find((entry)=>entry.id===item.productId);if(!product){setToast("Sản phẩm không còn trong danh sách");return;}if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}await mutate("addPick",{productId:product.id,quantity:item.quantity});};
 
+  if (!data && authMode) return <AuthScreen mode={authMode} busy={busy} error={error} onSubmit={authenticate}/>;
   if (!data && busy) return <main className="loading-screen"><div className="spinner"/><b>Đang đồng bộ dữ liệu cửa hàng…</b></main>;
   if (!data && error) return <main className="loading-screen"><b>Không thể mở dữ liệu</b><p>{error}</p><button onClick={()=>void loadData()}>Thử lại</button></main>;
   if (!data) return null;
@@ -189,7 +216,7 @@ export default function Home() {
           {(["PRODUCTS","STOCK","LOSS","DATE"] as Tab[]).includes(tab)&&<OpsFilters lines={availableLines} line={lineFilter} stock={stockFilter} visible={filtered.length} total={products.length} onLine={setLineFilter} onStock={setStockFilter} onClear={()=>{setQuery("");setLineFilter("all");setStockFilter("all")}}/>}
           {tab==="DASHBOARD"&&<Dashboard products={products} logs={data.logs} totals={{outCount,lowCount,totalLoss,expiring}} onGo={setTab}/>}
           {tab==="MAP"&&<MapView products={products} lineConfigs={data.lineConfigs||[]} query={query} canManage={canManage(data.actor.role)} onOpen={(line,side)=>setPogModal({line,side})} onEdit={(lineConfig)=>setLineModal(lineConfig)}/>}
-          {tab==="PRODUCTS"&&<ProductsView products={filtered} role={data.actor.role} onAdd={()=>setProductModal({...emptyProduct})} onEdit={(p)=>setProductModal({...p})} onDelete={(p)=>void mutate("deleteProduct",{id:p.id})} onMap={openProductOnMap} onPick={(p)=>void mutate("addPick",{productId:p.id})} onExport={exportCsv} onImport={()=>csvRef.current?.click()}/>}
+          {tab==="PRODUCTS"&&<ProductsView products={filtered} role={data.actor.role} importResult={masterImport} onAdd={()=>setProductModal({...emptyProduct})} onEdit={(p)=>setProductModal({...p})} onDelete={(p)=>void mutate("deleteProduct",{id:p.id})} onMap={openProductOnMap} onPick={(p)=>void mutate("addPick",{productId:p.id})} onExport={exportCsv} onImport={()=>excelRef.current?.click()}/>}
           {tab==="STOCK"&&<CheckGrid kind="stock" products={filtered} onAdjust={(p,d)=>void mutate("adjustStock",{id:p.id,delta:d})}/>}
           {tab==="LOSS"&&<CheckGrid kind="loss" products={filtered} onAdjust={(p,d)=>void mutate("adjustLoss",{id:p.id,delta:d})}/>}
           {tab==="DATE"&&<DateGrid products={filtered} onChange={(p,value)=>void mutate("updateDate",{id:p.id,expDate:value})}/>}
@@ -199,14 +226,26 @@ export default function Home() {
       </div>
 
       <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>setTab(item.id)}><span>{item.icon}</span>{item.label}</button>)}</nav>
-      <input ref={csvRef} type="file" accept=".csv,text/csv" hidden onChange={(e)=>void importCsv(e.target.files?.[0])}/>
+      <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importExcel(e.target.files?.[0])}/>
 
       {productModal&&<ProductModal value={productModal} onChange={setProductModal} onClose={()=>setProductModal(null)} onSave={async()=>{if(await mutate("upsertProduct",{product:productModal}))setProductModal(null);}}/>}
-      {settingsOpen&&<SettingsModal actor={data.actor} users={data.users} theme={theme} onTheme={setTheme} onRole={(userId,role)=>void mutate("setRole",{userId,role})} onClose={()=>setSettingsOpen(false)}/>}
+      {settingsOpen&&<SettingsModal actor={data.actor} users={data.users} theme={theme} onTheme={setTheme} onCreate={(account)=>mutate("createAccount",{account})} onUpdate={(account)=>mutate("updateAccount",{account})} onPassword={(currentPassword,newPassword)=>mutate("changeOwnPassword",{currentPassword,newPassword})} onLogout={logout} onClose={()=>setSettingsOpen(false)}/>}
       {lineModal&&<LineConfigModal value={lineModal} onChange={setLineModal} onClose={()=>setLineModal(null)} onSave={async()=>{if(await mutate("updateLineConfig",{lineConfig:lineModal}))setLineModal(null);}}/>}
       {pogModal&&<PogModal modal={pogModal} setModal={setPogModal} products={pogProducts} file={activePog} search={pogSearch} setSearch={setPogSearch} canUpload={canManage(data.actor.role)} uploadRef={pogRef} onUpload={(file)=>void uploadPog(file)} onPick={(product)=>void quickAdd(product)} onClose={()=>setPogModal(null)}/>}
     </main>
   );
+}
+
+function AuthScreen({mode,busy,error,onSubmit}:{mode:"login"|"setup";busy:boolean;error:string;onSubmit:(credentials:{username:string;password:string;name?:string})=>Promise<void>}) {
+  const [username,setUsername]=useState("");const [password,setPassword]=useState("");const [name,setName]=useState("");
+  const setup=mode==="setup",valid=username.trim().length>=3&&password.length>=8&&(!setup||name.trim().length>=2);
+  return <main className="auth-screen"><section className="auth-card"><header><b>AEON</b><div><span>FULFILLMENT</span><strong>SMARTOPS</strong></div></header><div className="auth-intro"><p>{setup?"THIẾT LẬP LẦN ĐẦU":"TÀI KHOẢN NHÂN VIÊN"}</p><h1>{setup?"Tạo tài khoản Admin":"Đăng nhập"}</h1><span>{setup?"Tài khoản đầu tiên quản lý sản phẩm, Excel và phân quyền cho nhân viên.":"Đăng nhập để truy cập dữ liệu hàng hóa và đơn soạn của bạn."}</span></div><form onSubmit={(event)=>{event.preventDefault();if(valid&&!busy)void onSubmit({username:username.trim().toLowerCase(),password,name:name.trim()});}}>
+    {setup&&<label>Tên hiển thị<input value={name} autoComplete="name" onChange={(event)=>setName(event.target.value)} placeholder="Ví dụ: Nguyễn Văn An"/></label>}
+    <label>Tên đăng nhập<input value={username} autoCapitalize="none" autoComplete="username" onChange={(event)=>setUsername(event.target.value)} placeholder="Ví dụ: an.nguyen"/></label>
+    <label>Mật khẩu<input type="password" value={password} autoComplete={setup?"new-password":"current-password"} onChange={(event)=>setPassword(event.target.value)} placeholder="Tối thiểu 8 ký tự"/></label>
+    {error&&<div className="auth-error" aria-live="polite">{error}</div>}
+    <button disabled={!valid||busy}>{busy?<><i className="mini-spinner"/>Đang xử lý…</>:setup?"Tạo Admin và bắt đầu":"Đăng nhập"}</button>
+  </form>{setup&&<small>Chỉ hiển thị khi hệ thống chưa có tài khoản. Sau khi tạo, Admin có thể thêm Manager và Staff.</small>}</section><aside><span>01</span><b>Master Data rõ ràng</b><p>Tìm kiếm, kiểm tồn và cập nhật sản phẩm từ Excel theo đúng quyền được giao.</p></aside></main>;
 }
 
 function PageHead({eyebrow,title,subtitle,actions}:{eyebrow:string;title:string;subtitle:string;actions?:React.ReactNode}) {
@@ -232,16 +271,22 @@ function MapView({products,lineConfigs,query,canManage,onOpen,onEdit}:{products:
   return <div><PageHead eyebrow="BẢN ĐỒ CỬA HÀNG" title="Sơ đồ POG" subtitle="Chọn dãy và mặt kệ để xem vị trí sản phẩm chi tiết."/>
     <div className="full-map store-layout" aria-label="Sơ đồ layout cửa hàng"><div className="dd-zone dd-left">D&amp;D</div>{topLines.slice(0,5).map((line)=><LineCard key={line} line={line}/>)}<div className="promo-spine">PROMOTION</div>{topLines.slice(5).map((line)=><LineCard key={line} line={line}/>)}<div className="dd-zone dd-right">D&amp;D</div>{bottomLines.slice(0,8).map((line)=><LineCard key={line} line={line}/>)}{bottomLines.slice(8).map((line)=><LineCard key={line} line={line}/>)}</div><div className="you-are">● BẠN Ở ĐÂY · Chọn Mặt A hoặc B để xem sơ đồ kệ{canManage?" · Chọn ⚙ để chỉnh tên, màu và logo Line":""}</div></div>;
 }
-function ProductsView({products,role,onAdd,onEdit,onDelete,onMap,onPick,onExport,onImport}:{products:Product[];role:Role;onAdd:()=>void;onEdit:(p:Product)=>void;onDelete:(p:Product)=>void;onMap:(p:Product)=>void;onPick:(p:Product)=>void;onExport:()=>void;onImport:()=>void}) {
-  return <div><PageHead eyebrow="DỮ LIỆU HÀNG HÓA" title="Sản phẩm" subtitle={products.length+" sản phẩm đang hiển thị"} actions={<><button className="ghost" onClick={onExport}>↓ Xuất CSV</button>{canManage(role)&&<button className="ghost" onClick={onImport}>↑ Nhập CSV</button>}{canManage(role)&&<button className="primary" onClick={onAdd}>+ Thêm sản phẩm</button>}</>}/>
-    <div className="table-wrap"><table><thead><tr><th>SKU / Barcode</th><th>Sản phẩm</th><th>Vị trí</th><th>Giá</th><th>Tồn / Loss</th><th/></tr></thead><tbody>{products.map((p)=><tr key={p.id}>
-      <td data-label="Mã hàng"><b>{p.sku}</b><small>{p.barcode||"—"}</small></td>
-      <td data-label="Sản phẩm"><strong>{p.name}</strong><small>HSD {p.expDate?new Date(p.expDate+"T00:00:00").toLocaleDateString("vi-VN"):"—"}</small></td>
-      <td data-label="Vị trí"><button className="location-chip" onClick={()=>onMap(p)}>Line {p.line}{p.side} · Kệ {p.bay}</button></td>
-      <td data-label="Giá"><b>{money.format(p.price)} đ</b></td>
-      <td data-label="Tồn / Loss"><StockBadge stock={p.stock}/><small>Loss {p.loss}</small></td>
-      <td data-label=""><div className="row-actions"><button onClick={()=>onPick(p)}>+ Đơn</button>{canManage(role)&&<button onClick={()=>onEdit(p)}>Sửa</button>}{canManage(role)&&<button className="danger-text" onClick={()=>{if(window.confirm("Xóa sản phẩm “"+p.name+"”?"))onDelete(p)}}>Xóa</button>}</div></td>
-    </tr>)}</tbody></table></div></div>;
+function ProductsView({products,role,importResult,onAdd,onEdit,onDelete,onMap,onPick,onExport,onImport}:{products:Product[];role:Role;importResult:MasterImportResult|null;onAdd:()=>void;onEdit:(p:Product)=>void;onDelete:(p:Product)=>void;onMap:(p:Product)=>void;onPick:(p:Product)=>void;onExport:()=>void;onImport:()=>void}) {
+  return <div><PageHead eyebrow="MASTER DATA" title="Master Data sản phẩm" subtitle={products.length+" SKU đang hiển thị"} actions={<><button className="ghost" onClick={onExport}>↓ Xuất Master CSV</button>{canManage(role)&&<button className="ghost" onClick={onImport}>↑ Nhập Excel (.xlsx)</button>}{canManage(role)&&<button className="primary" onClick={onAdd}>+ Thêm sản phẩm</button>}</>}/>
+    <div className="master-help"><b>Định dạng nhập Excel</b><span>Giữ đúng 9 cột bên dưới · đọc sheet đầu tiên · tối đa 500.000 dòng / 100 MB · cập nhật theo SKU. Nên đặt SKU và barcode ở định dạng Text để giữ số 0 đầu.</span></div>
+    {importResult&&<section className="master-import-summary"><div><b>Đã nhập {importResult.fileName}</b><span>{importResult.created} SKU mới · {importResult.updated} cập nhật · {importResult.unchanged} không thay đổi</span></div><strong>{importResult.totalProducts} SKU</strong>{importResult.skipped>0&&<small>{importResult.skipped} dòng được bỏ qua{importResult.duplicates>0?" · "+importResult.duplicates+" dòng SKU trùng":""}{importResult.issues[0]?" · Dòng "+importResult.issues[0].row+": "+importResult.issues[0].reason:""}</small>}</section>}
+    <div className="table-wrap"><table className="master-table"><thead><tr><th>SKU</th><th>TÊN SẢN PHẨM</th><th>Division</th><th>DIVISION NAME</th><th>Department</th><th>DEPARTMENT</th><th>SUPPLIER BARCODE</th><th>Line</th><th>LINE NAME</th><th/></tr></thead><tbody>{products.map((p)=><tr key={p.id}>
+      <td data-label="SKU"><b>{p.sku}</b></td>
+      <td data-label="TÊN SẢN PHẨM"><strong>{p.name}</strong></td>
+      <td data-label="Division">{p.division||"—"}</td>
+      <td data-label="DIVISION NAME">{p.divisionName||"—"}</td>
+      <td data-label="Department">{p.department||"—"}</td>
+      <td data-label="DEPARTMENT">{p.departmentName||"—"}</td>
+      <td data-label="SUPPLIER BARCODE"><b>{p.supplierBarcode||"—"}</b></td>
+      <td data-label="Line"><b>{p.line}</b></td>
+      <td data-label="LINE NAME">{p.lineName||"—"}</td>
+      <td data-label=""><div className="row-actions"><button onClick={()=>onPick(p)}>+ Đơn</button><button onClick={()=>onMap(p)}>Vị trí</button>{canManage(role)&&<button onClick={()=>onEdit(p)}>Sửa</button>}{canManage(role)&&<button className="danger-text" onClick={()=>{if(window.confirm("Xóa sản phẩm “"+p.name+"”?"))onDelete(p)}}>Xóa</button>}</div></td>
+    </tr>)}{!products.length&&<tr><td colSpan={10}><div className="empty big"><b>Chưa có sản phẩm phù hợp</b><span>Thử đổi bộ lọc hoặc nhập Master Data từ Excel.</span></div></td></tr>}</tbody></table></div></div>;
 }
 function CheckGrid({kind,products,onAdjust}:{kind:"stock"|"loss";products:Product[];onAdjust:(p:Product,d:number)=>void}) {
   const isLoss=kind==="loss";return <div><PageHead eyebrow={isLoss?"KIỂM SOÁT THẤT THOÁT":"KIỂM KÊ TỒN KHO"} title={isLoss?"Kiểm thất thoát":"Kiểm tồn kho"} subtitle={isLoss?"Ghi nhận số lượng hủy, hỏng hoặc thất thoát.":"Điều chỉnh tồn khả dụng theo kết quả kiểm đếm."}/>
@@ -288,21 +333,43 @@ function SuggestView({value,onValue,onGenerate,result,busy,error,totalProducts,o
 }
 function ProductModal({value,onChange,onClose,onSave}:{value:Product;onChange:(p:Product)=>void;onClose:()=>void;onSave:()=>void}) {
   const set=(key:keyof Product,next:string|number)=>onChange({...value,[key]:next});
-  return <div className="modal-backdrop"><section className="form-modal"><div className="modal-head"><div><p>MASTER DATA</p><h2>{value.id?"Chỉnh sửa sản phẩm":"Thêm sản phẩm"}</h2></div><button onClick={onClose}>×</button></div><div className="form-grid"><label>SKU<input value={value.sku} onChange={(e)=>set("sku",e.target.value)}/></label><label>Barcode<input value={value.barcode} onChange={(e)=>set("barcode",e.target.value)}/></label><label className="wide">Tên sản phẩm<input value={value.name} onChange={(e)=>set("name",e.target.value)}/></label><label>Line<input value={value.line} onChange={(e)=>set("line",e.target.value)}/></label><label>Mặt<select value={value.side} onChange={(e)=>set("side",e.target.value)}><option>A</option><option>B</option></select></label><label>Kệ<input type="number" min="1" value={value.bay} onChange={(e)=>set("bay",Number(e.target.value))}/></label><label>Giá<input type="number" min="0" value={value.price} onChange={(e)=>set("price",Number(e.target.value))}/></label><label>Tồn<input type="number" min="0" value={value.stock} onChange={(e)=>set("stock",Number(e.target.value))}/></label><label>Loss<input type="number" min="0" value={value.loss} onChange={(e)=>set("loss",Number(e.target.value))}/></label><label className="wide">Hạn sử dụng<input type="date" value={value.expDate} onChange={(e)=>set("expDate",e.target.value)}/></label></div><div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" onClick={onSave}>Lưu sản phẩm</button></div></section></div>;
+  const setSupplierBarcode=(next:string)=>onChange({...value,supplierBarcode:next,barcode:next});
+  return <div className="modal-backdrop"><section className="form-modal"><div className="modal-head"><div><p>MASTER DATA</p><h2>{value.id?"Chỉnh sửa sản phẩm":"Thêm sản phẩm"}</h2></div><button onClick={onClose}>×</button></div><div className="form-grid">
+    <h3 className="form-section-title">Thông tin Master Data</h3>
+    <label>SKU<input value={value.sku} onChange={(e)=>set("sku",e.target.value)}/></label><label>SUPPLIER BARCODE<input value={value.supplierBarcode||""} onChange={(e)=>setSupplierBarcode(e.target.value)}/></label>
+    <label className="wide">TÊN SẢN PHẨM<input value={value.name} onChange={(e)=>set("name",e.target.value)}/></label>
+    <label>Division<input value={value.division||""} onChange={(e)=>set("division",e.target.value)}/></label><label>DIVISION NAME<input value={value.divisionName||""} onChange={(e)=>set("divisionName",e.target.value)}/></label>
+    <label>Department<input value={value.department||""} onChange={(e)=>set("department",e.target.value)}/></label><label>DEPARTMENT<input value={value.departmentName||""} onChange={(e)=>set("departmentName",e.target.value)}/></label>
+    <label>Line<input value={value.line} inputMode="numeric" maxLength={2} onChange={(e)=>set("line",e.target.value)}/></label><label>LINE NAME<input value={value.lineName||""} onChange={(e)=>set("lineName",e.target.value)}/></label>
+    <h3 className="form-section-title">Thông tin vận hành</h3>
+    <label>Mặt<select value={value.side} onChange={(e)=>set("side",e.target.value)}><option>A</option><option>B</option></select></label><label>Kệ<input type="number" min="1" value={value.bay} onChange={(e)=>set("bay",Number(e.target.value))}/></label>
+    <label>Giá<input type="number" min="0" value={value.price} onChange={(e)=>set("price",Number(e.target.value))}/></label><label>Tồn<input type="number" min="0" value={value.stock} onChange={(e)=>set("stock",Number(e.target.value))}/></label>
+    <label>Loss<input type="number" min="0" value={value.loss} onChange={(e)=>set("loss",Number(e.target.value))}/></label><label>Hạn sử dụng<input type="date" value={value.expDate} onChange={(e)=>set("expDate",e.target.value)}/></label>
+  </div><div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" onClick={onSave}>Lưu sản phẩm</button></div></section></div>;
 }
 function LineConfigModal({value,onChange,onClose,onSave}:{value:LineConfig;onChange:(config:LineConfig)=>void;onClose:()=>void;onSave:()=>void}) {
   return <div className="modal-backdrop"><section className="form-modal line-config-modal"><div className="modal-head"><div><p>THIẾT LẬP SƠ ĐỒ</p><h2>Line {value.line}</h2></div><button onClick={onClose}>×</button></div><div className="line-config-preview" style={{"--line":value.color} as React.CSSProperties}><b>{value.logo||value.name}</b><span>LINE {value.line}</span></div><div className="form-grid"><label className="wide">Tên hiển thị<input value={value.name} maxLength={48} onChange={(e)=>onChange({...value,name:e.target.value})} placeholder="Ví dụ: Tea Drinks"/></label><label>Màu Line<input type="color" value={value.color} onChange={(e)=>onChange({...value,color:e.target.value.toUpperCase()})}/></label><label>Mã màu<input value={value.color} maxLength={7} onChange={(e)=>onChange({...value,color:e.target.value.toUpperCase()})} placeholder="#DFB100"/></label><label className="wide">Logo / biểu tượng<input value={value.logo} maxLength={36} onChange={(e)=>onChange({...value,logo:e.target.value})} placeholder="Ví dụ: TOPVALU, ★, 🥛 (để trống để hiện tên Line)"/></label></div><p className="form-note">Logo hỗ trợ chữ ngắn hoặc emoji. Để trống logo nếu muốn hiển thị tên Line ở giữa kệ.</p><div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" onClick={onSave}>Lưu Line</button></div></section></div>;
 }
-function SettingsModal({actor,users,theme,onTheme,onRole,onClose}:{actor:Actor;users:UserRole[];theme:string;onTheme:(v:string)=>void;onRole:(id:string,role:Role)=>void;onClose:()=>void}) {
+function SettingsModal({actor,users,theme,onTheme,onCreate,onUpdate,onPassword,onLogout,onClose}:{actor:Actor;users:UserRole[];theme:string;onTheme:(v:string)=>void;onCreate:(account:{name:string;username:string;password:string;role:Role})=>Promise<boolean>;onUpdate:(account:{userId:string;name?:string;role?:Role;active?:boolean;password?:string})=>Promise<boolean>;onPassword:(currentPassword:string,newPassword:string)=>Promise<boolean>;onLogout:()=>Promise<void>;onClose:()=>void}) {
   const themes=[["aeon","AEON"],["aeon-soft","AEON sáng"],["graphite","Tương phản"]] as const;
-  return <div className="modal-backdrop"><section className="settings-modal"><div className="modal-head"><div><p>CÀI ĐẶT</p><h2>Giao diện & phân quyền</h2></div><button onClick={onClose}>×</button></div><h3>Màu chủ đạo</h3><div className="theme-row">{themes.map(([color,label])=><button key={color} className={theme===color?"active":""} data-color={color} onClick={()=>onTheme(color)}><i/>{label}</button>)}</div><h3>Tài khoản đã truy cập</h3><div className="user-list">{users.map((user)=><article key={user.userId}><span>{user.name.slice(0,2).toUpperCase()}</span><div><b>{user.name}</b><small>{user.email}</small></div>{actor.role==="ADMIN"&&user.userId!==actor.userId?<select value={user.role} onChange={(e)=>onRole(user.userId,e.target.value as Role)}><option>ADMIN</option><option>MANAGER</option><option>STAFF</option></select>:<em>{user.role}</em>}</article>)}</div><div className="modal-actions"><a className="ghost" href="/signout-with-chatgpt?return_to=/">Đăng xuất</a><button className="primary" onClick={onClose}>Đóng</button></div></section></div>;
+  const [draft,setDraft]=useState<{name:string;username:string;password:string;role:Role}>({name:"",username:"",password:"",role:"STAFF"});
+  const [currentPassword,setCurrentPassword]=useState("");const [newPassword,setNewPassword]=useState("");
+  const create=async()=>{if(await onCreate({...draft,username:draft.username.trim().toLowerCase()}))setDraft({name:"",username:"",password:"",role:"STAFF"});};
+  const changePassword=async()=>{if(await onPassword(currentPassword,newPassword)){setCurrentPassword("");setNewPassword("");}};
+  const resetPassword=(user:UserRole)=>{const password=window.prompt("Nhập mật khẩu mới cho "+user.name+" (tối thiểu 8 ký tự):");if(password!==null)void onUpdate({userId:user.userId,password});};
+  return <div className="modal-backdrop"><section className="settings-modal account-settings"><div className="modal-head"><div><p>TÀI KHOẢN</p><h2>Tài khoản & phân quyền</h2></div><button onClick={onClose}>×</button></div><h3>Giao diện</h3><div className="theme-row">{themes.map(([color,label])=><button key={color} className={theme===color?"active":""} data-color={color} onClick={()=>onTheme(color)}><i/>{label}</button>)}</div>
+    <h3>Tài khoản của tôi</h3><div className="my-account"><span>{actor.name.slice(0,2).toUpperCase()}</span><div><b>{actor.name}</b><small>@{actor.username} · {actor.role}</small></div></div>
+    <div className="password-form"><label>Mật khẩu hiện tại<input type="password" value={currentPassword} autoComplete="current-password" onChange={(event)=>setCurrentPassword(event.target.value)}/></label><label>Mật khẩu mới<input type="password" value={newPassword} autoComplete="new-password" onChange={(event)=>setNewPassword(event.target.value)} placeholder="Tối thiểu 8 ký tự"/></label><button disabled={!currentPassword||newPassword.length<8} onClick={()=>void changePassword()}>Đổi mật khẩu</button></div>
+    {actor.role==="ADMIN"&&<><h3>Tạo tài khoản mới</h3><div className="role-guide"><span><b>Staff</b>Nghiệp vụ soạn hàng</span><span><b>Manager</b>Thêm, sửa, xóa, nhập Excel</span><span><b>Admin</b>Toàn quyền và phân quyền</span></div><div className="account-create"><label>Tên hiển thị<input value={draft.name} onChange={(event)=>setDraft({...draft,name:event.target.value})}/></label><label>Tên đăng nhập<input value={draft.username} autoCapitalize="none" onChange={(event)=>setDraft({...draft,username:event.target.value})}/></label><label>Mật khẩu tạm<input type="password" value={draft.password} onChange={(event)=>setDraft({...draft,password:event.target.value})}/></label><label>Phân quyền<select value={draft.role} onChange={(event)=>setDraft({...draft,role:event.target.value as Role})}><option value="STAFF">Staff</option><option value="MANAGER">Manager</option><option value="ADMIN">Admin</option></select></label><button disabled={draft.name.trim().length<2||draft.username.trim().length<3||draft.password.length<8} onClick={()=>void create()}>+ Tạo tài khoản</button></div>
+    <h3>Danh sách tài khoản</h3><div className="user-list account-list">{users.map((user)=><article key={user.userId} className={user.active?"":"inactive"}><span>{user.name.slice(0,2).toUpperCase()}</span><div className="account-identity"><b>{user.name}</b><small>@{user.username} · {user.active?"Đang hoạt động":"Đã khóa"}</small></div><div className="account-controls">{user.userId===actor.userId?<em>{user.role}</em>:<><select value={user.role} onChange={(event)=>void onUpdate({userId:user.userId,role:event.target.value as Role})}><option value="ADMIN">Admin</option><option value="MANAGER">Manager</option><option value="STAFF">Staff</option></select><button onClick={()=>void onUpdate({userId:user.userId,active:!user.active})}>{user.active?"Khóa":"Mở"}</button><button onClick={()=>resetPassword(user)}>Mật khẩu</button></>}</div></article>)}</div></>}
+    <div className="modal-actions"><button className="ghost danger-text" onClick={()=>void onLogout()}>Đăng xuất</button><button className="primary" onClick={onClose}>Đóng</button></div></section></div>;
 }
 function PogModal({modal,setModal,products,file,search,setSearch,canUpload,uploadRef,onUpload,onPick,onClose}:{modal:{line:string;side:"A"|"B";selectedId?:string};setModal:(v:{line:string;side:"A"|"B";selectedId?:string})=>void;products:Product[];file?:PogFile;search:string;setSearch:(v:string)=>void;canUpload:boolean;uploadRef:React.RefObject<HTMLInputElement|null>;onUpload:(f?:File)=>void;onPick:(p:Product)=>void;onClose:()=>void}) {
   const selected=products.find((p)=>p.id===modal.selectedId);
   const switchSide=(side:"A"|"B")=>{setSearch("");setModal({line:modal.line,side})};
   return <div className="modal-backdrop pog-backdrop"><section className="pog-modal"><div className="pog-head"><div><p>SƠ ĐỒ KỆ CHI TIẾT</p><h2>Line {modal.line} · {aisleNames[modal.line]||"Khu vực"}</h2></div><div className="side-switch"><button className={modal.side==="A"?"active":""} onClick={()=>switchSide("A")}>Mặt A</button><button className={modal.side==="B"?"active":""} onClick={()=>switchSide("B")}>Mặt B</button></div>{canUpload&&<button className="upload-pog" onClick={()=>uploadRef.current?.click()}>↑ Tải ảnh/PDF</button>}<button className="close-pog" onClick={onClose}>×</button></div>
     <div className="pog-body"><div className="pog-visual">{file?(file.mimeType==="application/pdf"?<iframe src={"/api/pog?id="+file.id} title="POG PDF"/>:<img src={"/api/pog?id="+file.id} alt={"POG Line "+modal.line}/>):<ShelfPlan products={products} selectedId={modal.selectedId}/>} {file&&file.mimeType!=="application/pdf"&&selected&&<div className="image-marker" style={{left:`${Math.min(91,8+selected.bay*10)}%`}}><i/><span>Kệ {selected.bay}<b>{selected.name}</b></span></div>}<div className="pog-file-label">{file?file.fileName:"Sơ đồ kệ tự động từ Master Data"}</div></div>
-    <aside className="pog-list"><label>⌕<input value={search} onChange={(e)=>setSearch(e.target.value)} placeholder="Tìm SKU, barcode, tên…"/><b>{products.length} SP</b></label><div>{products.map((p)=><button key={p.id} className={p.id===modal.selectedId?"active":""} onClick={()=>setModal({...modal,selectedId:p.id})}><span>Kệ {p.bay}</span><div><small>SKU {p.sku}</small><b>{p.name}</b><em>{p.barcode}</em></div><StockBadge stock={p.stock}/></button>)}{!products.length&&<div className="empty big">Chưa có sản phẩm ở mặt kệ này.</div>}</div>{selected&&<section className="pog-selected"><div><b>Line {selected.line}{selected.side} · Kệ {selected.bay}</b><span>{selected.name}</span><small>Tồn {selected.stock} · Loss {selected.loss} · HSD {selected.expDate||"chưa có"}</small></div><button disabled={selected.stock===0} onClick={()=>onPick(selected)}>+ Thêm vào đơn</button></section>}</aside></div>
+    <aside className="pog-list"><label>⌕<input value={search} onChange={(e)=>setSearch(e.target.value)} placeholder="Tìm SKU, barcode, tên…"/><b>{products.length} SP</b></label><div>{products.map((p)=><button key={p.id} className={p.id===modal.selectedId?"active":""} onClick={()=>setModal({...modal,selectedId:p.id})}><span>Kệ {p.bay}</span><div><small>SKU {p.sku}</small><b>{p.name}</b><em>{p.supplierBarcode||p.barcode}</em></div><StockBadge stock={p.stock}/></button>)}{!products.length&&<div className="empty big">Chưa có sản phẩm ở mặt kệ này.</div>}</div>{selected&&<section className="pog-selected"><div><b>Line {selected.line}{selected.side} · Kệ {selected.bay}</b><span>{selected.name}</span><small>Tồn {selected.stock} · Loss {selected.loss} · HSD {selected.expDate||"chưa có"}</small></div><button disabled={selected.stock===0} onClick={()=>onPick(selected)}>+ Thêm vào đơn</button></section>}</aside></div>
     <input ref={uploadRef} hidden type="file" accept="image/*,application/pdf" onChange={(e)=>onUpload(e.target.files?.[0])}/></section></div>;
 }
 function ShelfPlan({products,selectedId}:{products:Product[];selectedId?:string}) {
