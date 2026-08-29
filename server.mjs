@@ -5,13 +5,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer as createViteServer } from "vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const production = process.env.NODE_ENV === "production";
+const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 3000);
-const uploadDir = path.resolve(root, process.env.UPLOAD_DIR || "data/uploads");
-const statePath = path.resolve(root, "data/store.json");
+const dataDir = path.resolve(root, process.env.DATA_DIR || "data");
+const uploadDir = path.resolve(root, process.env.UPLOAD_DIR || path.join(dataDir,"uploads"));
+const statePath = path.join(dataDir, "store.json");
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
 
 const lineDefaults = [
@@ -47,12 +47,12 @@ function audit(state, actor, action) {
 }
 
 class StateStore {
+  queue = Promise.resolve();
   async init() {
     mkdirSync(uploadDir, { recursive: true });
     if (pool) {
       await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_state (id BOOLEAN PRIMARY KEY DEFAULT TRUE, state JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
-      const result = await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE");
-      if (!result.rowCount) await pool.query("INSERT INTO fulfillment_state (id,state) VALUES (TRUE,$1::jsonb)", [JSON.stringify(initialState())]);
+      await pool.query("INSERT INTO fulfillment_state (id,state) VALUES (TRUE,$1::jsonb) ON CONFLICT (id) DO NOTHING", [JSON.stringify(initialState())]);
     } else {
       mkdirSync(path.dirname(statePath), { recursive: true });
       if (!existsSync(statePath)) await fs.writeFile(statePath, JSON.stringify(initialState(), null, 2));
@@ -67,7 +67,32 @@ class StateStore {
     if (pool) await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
     else await fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
-  async mutate(callback) { const state = await this.read(); const value = await callback(state); await this.save(state); return value; }
+  async mutate(callback) {
+    const run = async () => {
+      if (pool) {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const result = await client.query("SELECT state FROM fulfillment_state WHERE id=TRUE FOR UPDATE");
+          const state = result.rows[0].state;
+          const value = await callback(state);
+          await client.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
+          await client.query("COMMIT");
+          return value;
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally { client.release(); }
+      }
+      const state = await this.read();
+      const value = await callback(state);
+      await this.save(state);
+      return value;
+    };
+    const task = this.queue.then(run, run);
+    this.queue = task.catch(() => undefined);
+    return task;
+  }
 }
 
 const store = new StateStore();
@@ -75,11 +100,21 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+app.use((req,res,next)=>{
+  const cookies=Object.fromEntries((req.headers.cookie||"").split(";").map((part)=>part.trim().split(/=(.*)/s).slice(0,2)).filter(([key])=>key));
+  const existing=asText(cookies.fulfillment_device);
+  const userId=/^device-[a-f0-9-]{36}$/.test(existing)?existing:"device-"+randomUUID();
+  req.fulfillmentUserId=userId;
+  if(userId!==existing)res.append("Set-Cookie","fulfillment_device="+userId+"; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"+(production?"; Secure":""));
+  next();
+});
+app.get("/healthz", (_req,res) => res.json({ ok:true, storage:pool?"postgres":"local-json" }));
 
 function actorFrom(req, state) {
-  const userId = asText(req.header("x-user-id"), "local-user");
-  const email = asText(req.header("x-user-email"), "local@fulfillment.smartops");
-  const name = asText(req.header("x-user-name"), email.split("@")[0] || "Nhân viên");
+  const userId = req.fulfillmentUserId;
+  const suffix = userId.slice(-4).toUpperCase();
+  const email = "device-"+suffix.toLowerCase()+"@fulfillment.local";
+  const name = "Nhân viên "+suffix;
   let role = state.roles.find((item) => item.userId === userId);
   if (!role) { role = { userId, email, name, role: state.roles.length ? "STAFF" : "ADMIN", createdAt: Date.now() }; state.roles.push(role); }
   else { role.email = email; role.name = name; }
@@ -119,8 +154,9 @@ app.post("/api/store", async (req, res, next) => {
         const rows=Array.isArray(body.products)?body.products.slice(0,1000):[]; let count=0;
         for(const row of rows) {
           const sku=asText(row.sku),name=asText(row.name); if(!sku||!name)continue;
-          const product={id:asText(row.id)||randomUUID(),sku,barcode:asText(row.barcode),name,line:cleanLine(row.line),side:asText(row.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(row.bay,1)),price:Math.max(0,asInt(row.price)),stock:Math.max(0,asInt(row.stock)),loss:Math.max(0,asInt(row.loss)),expDate:asText(row.expDate),updatedAt:Date.now()};
-          const index=state.products.findIndex((item)=>item.sku===sku); if(index>=0)state.products[index]=product;else state.products.unshift(product); count++;
+          const index=state.products.findIndex((item)=>item.sku===sku),existing=index>=0?state.products[index]:null;
+          const product={id:asText(row.id)||existing?.id||randomUUID(),sku,barcode:asText(row.barcode),name,line:cleanLine(row.line),side:asText(row.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(row.bay,1)),price:Math.max(0,asInt(row.price)),stock:Math.max(0,asInt(row.stock)),loss:Math.max(0,asInt(row.loss)),expDate:asText(row.expDate),updatedAt:Date.now()};
+          if(index>=0)state.products[index]=product;else state.products.unshift(product); count++;
         }
         audit(state,actor,"Nhập CSV Master Data: "+count+" sản phẩm"); return {ok:true,count};
       }
@@ -136,7 +172,8 @@ app.post("/api/store", async (req, res, next) => {
         if(action==="updateDate"){product.expDate=asText(body.expDate);audit(state,actor,"Cập nhật HSD SKU "+product.sku);}
         product.updatedAt=Date.now();return {ok:true};
       }
-      if(action==="addPick"){const productId=asText(body.productId);if(!state.products.some((p)=>p.id===productId))return fail("Không tìm thấy sản phẩm",404);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found)found.quantity=Math.max(1,Math.min(99,asInt(body.quantity,1)));else state.picking.push({userId:actor.userId,productId,quantity:Math.max(1,Math.min(99,asInt(body.quantity,1))),picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
+      if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1)));if(!state.products.some((p)=>p.id===productId))return fail("Không tìm thấy sản phẩm",404);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;}else state.picking.push({userId:actor.userId,productId,quantity,picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
+      if(action==="updatePickQuantity"){const item=state.picking.find((p)=>p.userId===actor.userId&&p.productId===asText(body.productId));if(!item)return fail("Sản phẩm không còn trong đơn",404);item.quantity=Math.max(1,Math.min(99,asInt(body.quantity,1)));item.picked=false;audit(state,actor,"Cập nhật số lượng cần lấy");return {ok:true};}
       if(action==="togglePick"){const item=state.picking.find((p)=>p.userId===actor.userId&&p.productId===asText(body.productId));if(item)item.picked=!item.picked;audit(state,actor,"Cập nhật trạng thái lấy hàng");return {ok:true};}
       if(action==="removePick"){state.picking=state.picking.filter((p)=>!(p.userId===actor.userId&&p.productId===asText(body.productId)));audit(state,actor,"Bỏ sản phẩm khỏi đơn soạn");return {ok:true};}
       if(action==="clearPick"){state.picking=state.picking.filter((p)=>p.userId!==actor.userId);audit(state,actor,"Hoàn tất và làm trống đơn soạn");return {ok:true};}
@@ -166,16 +203,18 @@ app.post("/api/pog", upload.single("file"), async (req, res, next) => {
       const line=cleanLine(req.body.line),side=asText(req.body.side,"A")==="B"?"B":"A",id=line+"_"+side,safeName=req.file.originalname.replace(/[^a-zA-Z0-9._-]/g,"-").slice(-100),fileKey=Date.now()+"-"+createHash("sha1").update(req.file.buffer).digest("hex").slice(0,10)+"-"+safeName;
       await fs.writeFile(path.join(uploadDir,fileKey),req.file.buffer);const index=state.pogFiles.findIndex((item)=>item.id===id);
       const item={id,line,side,fileKey,fileName:req.file.originalname,mimeType:req.file.mimetype,updatedAt:Date.now()};
-      if(index>=0){await fs.rm(path.join(uploadDir,state.pogFiles[index].fileKey),{force:true});state.pogFiles[index]=item;}else state.pogFiles.push(item);
+      if(index>=0)state.pogFiles[index]=item;else state.pogFiles.push(item);
       audit(state,actor,"Cập nhật POG Line "+line+" mặt "+side+": "+req.file.originalname);return {ok:true,id,fileName:req.file.originalname,mimeType:req.file.mimetype};
     });
     res.status(result.status||200).json(result);
   } catch (error) { next(error); }
 });
 
-app.use((error,_req,res,_next)=>{console.error(error);res.status(error.code==="LIMIT_FILE_SIZE"?413:500).json({error:error.code==="LIMIT_FILE_SIZE"?"Tệp vượt quá 20 MB":"Máy chủ gặp lỗi. Vui lòng thử lại."});});
 await store.init();
+app.use("/api",(_req,res)=>res.status(404).json({error:"API không tồn tại"}));
 if(production)app.use(express.static(path.join(root,"dist")));
-else { const vite=await createViteServer({root,server:{middlewareMode:true},appType:"spa"});app.use(vite.middlewares); }
-app.use((_req,res)=>res.sendFile(path.join(root,"dist/index.html")));
+else { const {createServer:createViteServer}=await import("vite");const vite=await createViteServer({root,server:{middlewareMode:true},appType:"spa"});app.use(vite.middlewares); }
+app.use((req,res,next)=>{if(req.method!=="GET"||!req.accepts("html"))return next();res.sendFile(path.join(root,"dist/index.html"));});
+app.use((_req,res)=>res.status(404).json({error:"Không tìm thấy"}));
+app.use((error,_req,res,next)=>{void next;console.error(error);res.status(error.code==="LIMIT_FILE_SIZE"?413:500).json({error:error.code==="LIMIT_FILE_SIZE"?"Tệp vượt quá 20 MB":"Máy chủ gặp lỗi. Vui lòng thử lại."});});
 app.listen(port,"0.0.0.0",()=>console.log("Fulfillment SmartOps listening on http://0.0.0.0:"+port));
