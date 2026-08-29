@@ -12,6 +12,8 @@ type Audit = { id:string; action:string; userId:string; userName:string; created
 type UserRole = { userId:string; email:string; name:string; role:Role; createdAt:number };
 type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; updatedAt:number };
 type LineConfig = { line:string; name:string; color:string; logo:string; updatedAt?:number };
+type AiSuggestion = { productId:string; sku:string; name:string; line:string; side:"A"|"B"; bay:number; price:number; stock:number; quantity:number; reason:string };
+type AiSuggestionResult = { mode:"ai"|"local"; model:string|null; summary:string; notice:string; items:AiSuggestion[]; productCount:number };
 type StoreData = { actor:Actor; products:Product[]; logs:Audit[]; picking:PickItem[]; users:UserRole[]; pogFiles:PogFile[]; lineConfigs?:LineConfig[] };
 
 const aisleNames: Record<string,string> = {
@@ -58,7 +60,9 @@ export default function Home() {
   const [pogModal,setPogModal] = useState<{line:string;side:"A"|"B";selectedId?:string}|null>(null);
   const [pogSearch,setPogSearch] = useState("");
   const [suggestInput,setSuggestInput] = useState("");
-  const [suggestions,setSuggestions] = useState<Array<{name:string;line:string;reason:string}>>([]);
+  const [suggestResult,setSuggestResult] = useState<AiSuggestionResult|null>(null);
+  const [suggestBusy,setSuggestBusy] = useState(false);
+  const [suggestError,setSuggestError] = useState("");
   const [theme,setTheme] = useState(()=>{if(typeof window==="undefined")return "aeon";const saved=window.localStorage.getItem("fulfillment-theme");return ["aeon","aeon-soft","graphite"].includes(saved||"")?saved!:"aeon"});
   const csvRef = useRef<HTMLInputElement>(null);
   const pogRef = useRef<HTMLInputElement>(null);
@@ -142,13 +146,22 @@ export default function Home() {
       await loadData(true);setToast("Đã cập nhật POG "+pogModal.line+pogModal.side);
     } catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải POG");} finally{setBusy(false);if(pogRef.current)pogRef.current.value="";}
   };
-  const generateSuggestions = () => {
-    const value=normalize(suggestInput);let list:Array<{name:string;line:string;reason:string}>=[];
-    if(/lau|hotpot/.test(value))list=[{name:"Rau và nấm",line:"03",reason:"Ăn kèm lẩu"},{name:"Thịt và hải sản",line:"28",reason:"Món nhúng"},{name:"Mì / bún",line:"24",reason:"Tinh bột"},{name:"Sốt lẩu",line:"26",reason:"Nước dùng"}];
-    else if(/nuong|bbq/.test(value))list=[{name:"Sốt BBQ",line:"26",reason:"Tẩm ướp"},{name:"Nước giải khát",line:"18",reason:"Dùng kèm"},{name:"Đồ gia dụng",line:"13",reason:"Dụng cụ nướng"}];
-    else {list=filtered.slice(0,5).map((p)=>({name:p.name,line:p.line,reason:p.stock?"Có sẵn trong kho":"Cần thay thế vì hết hàng"}));}
-    setSuggestions(list);
+  const generateSuggestions = async () => {
+    const value=suggestInput.trim();
+    if(value.length<2){setSuggestError("Hãy mô tả nhu cầu để AI có thể phân tích.");return;}
+    setSuggestBusy(true);setSuggestError("");
+    try {
+      const response=await fetch("/api/ai/suggest",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({query:value})});
+      const payload=await response.json() as AiSuggestionResult&{error?:string};
+      if(!response.ok)throw new Error(payload.error||"Không thể phân tích lúc này.");
+      const byId=new Map(products.map((product)=>[product.id,product]));
+      const items=(payload.items||[]).flatMap((item)=>{const product=byId.get(item.productId);return product?[{...item,sku:product.sku,name:product.name,line:product.line,side:product.side,bay:product.bay,price:product.price,stock:product.stock}]:[]});
+      setSuggestResult({...payload,items,productCount:products.length});
+    } catch(cause){setSuggestError(cause instanceof Error?cause.message:"Không thể phân tích lúc này.");}
+    finally{setSuggestBusy(false);}
   };
+  const openSuggested=(item:AiSuggestion)=>{const product=products.find((entry)=>entry.id===item.productId);if(product)openProductOnMap(product);else setToast("Sản phẩm không còn trong danh sách");};
+  const addSuggested=async(item:AiSuggestion)=>{const product=products.find((entry)=>entry.id===item.productId);if(!product){setToast("Sản phẩm không còn trong danh sách");return;}if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}await mutate("addPick",{productId:product.id,quantity:item.quantity});};
 
   if (!data && busy) return <main className="loading-screen"><div className="spinner"/><b>Đang đồng bộ dữ liệu cửa hàng…</b></main>;
   if (!data && error) return <main className="loading-screen"><b>Không thể mở dữ liệu</b><p>{error}</p><button onClick={()=>void loadData()}>Thử lại</button></main>;
@@ -181,11 +194,11 @@ export default function Home() {
           {tab==="LOSS"&&<CheckGrid kind="loss" products={filtered} onAdjust={(p,d)=>void mutate("adjustLoss",{id:p.id,delta:d})}/>}
           {tab==="DATE"&&<DateGrid products={filtered} onChange={(p,value)=>void mutate("updateDate",{id:p.id,expDate:value})}/>}
           {tab==="ORDER"&&<OrderView items={data.picking} onToggle={(p)=>void mutate("togglePick",{productId:p.id})} onQuantity={(p,quantity)=>void mutate("updatePickQuantity",{productId:p.id,quantity})} onRemove={(p)=>void mutate("removePick",{productId:p.id})} onClear={()=>void mutate("clearPick")} onMap={openProductOnMap}/>}
-          {tab==="SUGGEST"&&<SuggestView value={suggestInput} onValue={setSuggestInput} onGenerate={generateSuggestions} suggestions={suggestions} onLine={(line)=>setPogModal({line,side:"A"})}/>}
+          {tab==="SUGGEST"&&<SuggestView value={suggestInput} onValue={setSuggestInput} onGenerate={()=>void generateSuggestions()} result={suggestResult} busy={suggestBusy} error={suggestError} totalProducts={products.length} onMap={openSuggested} onPick={(item)=>void addSuggested(item)}/>}
         </section>
       </div>
 
-      <nav className="mobile-nav">{menu.slice(0,7).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>setTab(item.id)}><span>{item.icon}</span>{item.label.replace("Check ","")}</button>)}</nav>
+      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>setTab(item.id)}><span>{item.icon}</span>{item.label}</button>)}</nav>
       <input ref={csvRef} type="file" accept=".csv,text/csv" hidden onChange={(e)=>void importCsv(e.target.files?.[0])}/>
 
       {productModal&&<ProductModal value={productModal} onChange={setProductModal} onClose={()=>setProductModal(null)} onSave={async()=>{if(await mutate("upsertProduct",{product:productModal}))setProductModal(null);}}/>}
@@ -246,8 +259,32 @@ function OrderView({items,onToggle,onQuantity,onRemove,onClear,onMap}:{items:Pic
   return <div><PageHead eyebrow="PICKING LIST" title="Đơn đang soạn" subtitle={pickedUnits+"/"+totalUnits+" sản phẩm đã lấy · sắp theo lộ trình Line"} actions={items.length?<button className="primary" onClick={finish}>{next?"Kết thúc sớm":"Hoàn tất đơn"}</button>:undefined}/>{next&&<section className="next-pick"><div><small>ĐIỂM LẤY TIẾP THEO</small><b>Line {next.line}{next.side} · Kệ {next.bay}</b><span>{next.name} · SL {next.quantity}</span></div><button onClick={()=>onMap(next)}>Mở vị trí →</button></section>}<div className="order-progress-large"><i><span style={{width:percent+"%"}}/></i><b>{percent}%</b></div>
     <div className="order-list">{sorted.map((p)=><article key={p.id} className={p.picked?"picked":""}><button className="pick-check" aria-label={p.picked?"Đánh dấu chưa lấy":"Đánh dấu đã lấy"} onClick={()=>onToggle(p)}>{p.picked?"✓":""}</button><div><small>SKU {p.sku}</small><b>{p.name}</b><span>Line {p.line}{p.side} · Kệ {p.bay}</span></div><div className="pick-quantity"><button disabled={p.quantity<=1} onClick={()=>onQuantity(p,p.quantity-1)}>−</button><b>{p.quantity}</b><button onClick={()=>onQuantity(p,p.quantity+1)}>+</button></div><StockBadge stock={p.stock}/><button onClick={()=>onMap(p)}>Vị trí</button><button className="danger-text" onClick={()=>onRemove(p)}>Bỏ</button></article>)}{!items.length&&<div className="empty big"><b>Đơn soạn đang trống</b><span>Tìm hoặc quét barcode rồi chọn “+ Đơn”.</span></div>}</div></div>;
 }
-function SuggestView({value,onValue,onGenerate,suggestions,onLine}:{value:string;onValue:(v:string)=>void;onGenerate:()=>void;suggestions:Array<{name:string;line:string;reason:string}>;onLine:(line:string)=>void}) {
-  return <div><PageHead eyebrow="TRỢ LÝ NỘI BỘ" title="Gợi ý sản phẩm" subtitle="Nhập món ăn hoặc sự kiện để gợi ý nhóm hàng và vị trí."/><div className="suggest-box"><input value={value} onChange={(e)=>onValue(e.target.value)} onKeyDown={(e)=>{if(e.key==="Enter")onGenerate()}} placeholder="Ví dụ: lẩu, BBQ, tiệc sinh nhật…"/><button onClick={onGenerate}>✦ Phân tích</button></div><div className="suggestions">{suggestions.map((item,index)=><button key={index} onClick={()=>onLine(item.line)}><span>{String(index+1).padStart(2,"0")}</span><div><b>{item.name}</b><small>{item.reason}</small></div><strong>Line {item.line} →</strong></button>)}{!suggestions.length&&<div className="empty big">Nhập nhu cầu để bắt đầu gợi ý.</div>}</div></div>;
+function SuggestView({value,onValue,onGenerate,result,busy,error,totalProducts,onMap,onPick}:{value:string;onValue:(v:string)=>void;onGenerate:()=>void;result:AiSuggestionResult|null;busy:boolean;error:string;totalProducts:number;onMap:(item:AiSuggestion)=>void;onPick:(item:AiSuggestion)=>void}) {
+  const examples=["Lẩu cho 4 người","BBQ cuối tuần","Bữa sáng nhanh","Tiệc sinh nhật"];
+  return <div className="ai-page"><PageHead eyebrow="TRỢ LÝ AI" title="Gợi ý sản phẩm" subtitle="Phân tích trực tiếp danh sách hàng, tồn kho và vị trí kệ hiện có." actions={<span className="ai-catalog-status"><i/>{totalProducts} SKU sẵn sàng</span>}/>
+    <section className="ai-query-card">
+      <div className="ai-query-title"><span>AI</span><div><b>Bạn đang chuẩn bị gì?</b><small>Mô tả món ăn, sự kiện hoặc nhu cầu; kết quả chỉ lấy từ Master Data.</small></div></div>
+      <div className="ai-query-box">
+        <textarea rows={2} value={value} disabled={busy} onChange={(event)=>onValue(event.target.value)} onKeyDown={(event)=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();onGenerate();}}} placeholder="Ví dụ: Chuẩn bị lẩu cho 6 người, ưu tiên sản phẩm còn nhiều tồn…"/>
+        <button disabled={busy||value.trim().length<2} onClick={onGenerate}>{busy?<><i className="mini-spinner"/>Đang phân tích…</>:<>✦ Phân tích</>}</button>
+      </div>
+      <div className="ai-examples"><span>Gợi ý nhanh</span>{examples.map((example)=><button key={example} disabled={busy} onClick={()=>onValue(example)}>{example}</button>)}</div>
+    </section>
+
+    <div className="ai-feedback" aria-live="polite" aria-busy={busy}>
+      {busy&&<div className="ai-skeletons">{[0,1,2].map((item)=><article key={item}><i/><span/><span/><b/></article>)}</div>}
+      {!busy&&error&&<section className="ai-error"><div><b>Chưa thể phân tích</b><span>{error}</span></div><button onClick={onGenerate}>Thử lại</button></section>}
+      {!busy&&!error&&result&&<section className="ai-summary"><span className={"ai-source "+result.mode}>{result.mode==="ai"?"AI · OpenAI":"Phân tích nội bộ"}</span><div><b>{result.summary}</b>{result.notice&&<small>{result.notice}</small>}</div></section>}
+      {!busy&&!error&&result&&result.items.length>0&&<div className="ai-results">{result.items.map((item,index)=><article key={item.productId}>
+        <header><span>{String(index+1).padStart(2,"0")}</span><div><small>SKU {item.sku}</small><h2>{item.name}</h2></div><StockBadge stock={item.stock}/></header>
+        <p>{item.reason}</p>
+        <div className="ai-product-meta"><span>▦ Line {item.line}{item.side} · Kệ {item.bay}</span><span>{money.format(item.price)} đ</span><span>SL đề xuất: {item.quantity}</span></div>
+        <footer><button className="ai-secondary" onClick={()=>onMap(item)}>Xem vị trí</button><button className="ai-primary" disabled={item.stock===0} onClick={()=>onPick(item)}>+ Thêm vào đơn</button></footer>
+      </article>)}</div>}
+      {!busy&&!error&&result&&!result.items.length&&<div className="ai-empty"><b>Chưa tìm thấy sản phẩm phù hợp đang còn tồn</b><span>Hãy thử mô tả rộng hơn hoặc chọn một gợi ý nhanh phía trên.</span></div>}
+      {!busy&&!error&&!result&&<div className="ai-empty"><span className="ai-empty-mark">✦</span><b>AI chỉ đề xuất từ hàng hóa đang có</b><span>Không tạo tên sản phẩm, giá hoặc vị trí ngoài danh sách cửa hàng.</span></div>}
+    </div>
+  </div>;
 }
 function ProductModal({value,onChange,onClose,onSave}:{value:Product;onChange:(p:Product)=>void;onClose:()=>void;onSave:()=>void}) {
   const set=(key:keyof Product,next:string|number)=>onChange({...value,[key]:next});

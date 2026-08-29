@@ -6,9 +6,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "node server.mjs",
+    "dev": "node --env-file-if-exists=.env server.mjs",
     "build": "vite build",
-    "start": "node server.mjs --production",
+    "start": "node --env-file-if-exists=.env server.mjs --production",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
