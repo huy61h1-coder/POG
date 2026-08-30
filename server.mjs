@@ -827,23 +827,27 @@ app.get("/api/pog", async (req, res, next) => {
     if(!actorFrom(req,state))return res.status(401).send("Unauthorized");
     const record=state.pogFiles.find((file)=>file.id===asText(req.query.id));
     if(!record)return res.status(404).send("Not found");
-    const filePath=path.join(uploadDir,record.fileKey);if(!existsSync(filePath))return res.status(404).send("Not found");
-    res.type(record.mimeType).set("Content-Disposition","inline; filename="+record.fileName.replace(/"/g,"")).sendFile(filePath);
+    const shelf=asText(req.query.asset)==="shelf"&&record.shelfFileKey,fileKey=shelf?record.shelfFileKey:record.fileKey,mimeType=shelf?(record.shelfMimeType||"image/webp"):record.mimeType,fileName=shelf?(record.shelfFileName||"pog-shelf.webp"):record.fileName;
+    const filePath=path.join(uploadDir,fileKey);if(!existsSync(filePath))return res.status(404).send("Not found");
+    res.type(mimeType).set("Content-Disposition","inline; filename="+fileName.replace(/"/g,"")).sendFile(filePath);
   } catch (error) { next(error); }
 });
 
-app.post("/api/pog", requireManager, upload.single("file"), async (req, res, next) => {
+app.post("/api/pog", requireManager, upload.fields([{name:"file",maxCount:1},{name:"shelfImage",maxCount:1}]), async (req, res, next) => {
   try {
-    if(!req.file)return res.status(400).json({error:"Thiếu tệp"});
-    const isPdf=req.file.mimetype==="application/pdf"||/\.pdf$/i.test(req.file.originalname),isImage=req.file.mimetype.startsWith("image/");
+    const files=req.files||{},sourceFile=files.file?.[0],shelfFile=files.shelfImage?.[0];
+    if(!sourceFile)return res.status(400).json({error:"Thiếu tệp"});
+    const isPdf=sourceFile.mimetype==="application/pdf"||/\.pdf$/i.test(sourceFile.originalname),isImage=sourceFile.mimetype.startsWith("image/");
     if(!isImage&&!isPdf)return res.status(400).json({error:"Chỉ nhận ảnh hoặc PDF"});
     const result=await store.mutate(async(state)=>{
       const actor=actorFrom(req,state);if(!actor)return {error:"Vui lòng đăng nhập",status:401};if(!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};
-      const line=cleanLine(req.body.line),side=asText(req.body.side,"A")==="B"?"B":"A",id=line+"_"+side,safeName=req.file.originalname.replace(/[^a-zA-Z0-9._-]/g,"-").slice(-100),fileKey=Date.now()+"-"+createHash("sha1").update(req.file.buffer).digest("hex").slice(0,10)+"-"+safeName;
-      await fs.writeFile(path.join(uploadDir,fileKey),req.file.buffer);const index=state.pogFiles.findIndex((item)=>item.id===id);
-      const item={id,line,side,fileKey,fileName:req.file.originalname,mimeType:isPdf?"application/pdf":req.file.mimetype,page:Math.max(1,Math.min(99,asInt(req.body.page,1))),updatedAt:Date.now()};
+      const line=cleanLine(req.body.line),side=asText(req.body.side,"A")==="B"?"B":"A",id=line+"_"+side,safeName=sourceFile.originalname.replace(/[^a-zA-Z0-9._-]/g,"-").slice(-100),fileKey=Date.now()+"-"+createHash("sha1").update(sourceFile.buffer).digest("hex").slice(0,10)+"-"+safeName;
+      await fs.writeFile(path.join(uploadDir,fileKey),sourceFile.buffer);const index=state.pogFiles.findIndex((item)=>item.id===id);
+      let positions=[];try{positions=JSON.parse(asText(req.body.positions,"[]"));}catch{positions=[];}positions=Array.isArray(positions)?positions.slice(0,10000).map((position)=>({number:Math.max(0,asInt(position.number)),sku:asText(position.sku).slice(0,40),barcode:asText(position.barcode).slice(0,40),name:asText(position.name).slice(0,300),x:Math.max(0,Math.min(1,Number(position.x)||0)),y:Math.max(0,Math.min(1,Number(position.y)||0))})).filter((position)=>position.number&&position.sku):[];
+      let shelfFileKey="",shelfFileName="",shelfMimeType="";if(shelfFile&&shelfFile.mimetype.startsWith("image/")){shelfFileName=shelfFile.originalname.replace(/[^a-zA-Z0-9._-]/g,"-").slice(-100);shelfFileKey=Date.now()+"-shelf-"+createHash("sha1").update(shelfFile.buffer).digest("hex").slice(0,10)+"-"+shelfFileName;shelfMimeType=shelfFile.mimetype;await fs.writeFile(path.join(uploadDir,shelfFileKey),shelfFile.buffer);}
+      const item={id,line,side,fileKey,fileName:sourceFile.originalname,mimeType:isPdf?"application/pdf":sourceFile.mimetype,page:Math.max(1,Math.min(99,asInt(req.body.page,1))),shelfFileKey,shelfFileName,shelfMimeType,shelfImage:Boolean(shelfFileKey),shelfWidth:Math.max(0,asInt(req.body.shelfWidth)),shelfHeight:Math.max(0,asInt(req.body.shelfHeight)),positions,sourcePages:asText(req.body.sourcePages).split(",").map((value)=>asInt(value)).filter(Boolean),updatedAt:Date.now()};
       if(index>=0)state.pogFiles[index]=item;else state.pogFiles.push(item);
-      audit(state,actor,"Cập nhật POG Line "+line+" mặt "+side+": "+req.file.originalname);return {ok:true,id,fileName:req.file.originalname,mimeType:item.mimeType};
+      audit(state,actor,"Cập nhật POG Line "+line+" mặt "+side+": "+sourceFile.originalname+" · "+positions.length+" SKU đã liên kết");return {ok:true,id,fileName:sourceFile.originalname,mimeType:item.mimeType,mappedCount:positions.length,analyzedPages:item.sourcePages.length};
     });
     res.status(result.status||200).json(result);
   } catch (error) { next(error); }

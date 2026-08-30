@@ -11,7 +11,8 @@ type AssignedPickItem = PickItem & { assigneeId:string; assigneeName:string };
 type Actor = { userId:string; username:string; email:string; name:string; role:Role; active:boolean };
 type Audit = { id:string; action:string; userId:string; userName:string; createdAt:number };
 type UserRole = { userId:string; username:string; email:string; name:string; role:Role; active:boolean; createdAt:number; updatedAt?:number };
-type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; page?:number; updatedAt:number };
+type PogPosition = { number:number; sku:string; barcode:string; name:string; x:number; y:number };
+type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; page?:number; shelfImage?:boolean; shelfWidth?:number; shelfHeight?:number; positions?:PogPosition[]; updatedAt:number };
 type LineConfig = { line:string; name:string; color:string; logo:string; updatedAt?:number };
 type AiSuggestion = { productId:string; sku:string; name:string; line:string; side:"A"|"B"; bay:number; price:number; stock:number; quantity:number; reason:string };
 type AiSuggestionResult = { mode:"ai"|"local"; model:string|null; summary:string; notice:string; items:AiSuggestion[]; productCount:number };
@@ -51,6 +52,70 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
+
+type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
+type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
+type PogRow = { number:number; sku:string; barcode:string; name:string; y:number; page:number };
+
+async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
+  if(file.type!=="application/pdf"&&!/\.pdf$/i.test(file.name))return null;
+  const [pdfjs,worker]=await Promise.all([import("pdfjs-dist"),import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);pdfjs.GlobalWorkerOptions.workerSrc=worker.default;
+  const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
+  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number}>=[],allRows:PogRow[]=[];
+  for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
+    const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:1.35}),textContent=await page.getTextContent();
+    const tokens:PdfTextToken[]=[];
+    for(const item of textContent.items){
+      if(!("str" in item)||!item.str.trim())continue;
+      const [x,y]=viewport.convertToViewportPoint(item.transform[4],item.transform[5]);
+      tokens.push({text:item.str.trim(),x,y,fontSize:item.height});
+    }
+    const tableHeader=tokens.find((token)=>/^loca/i.test(token.text));if(!tableHeader)continue;
+    const tableAreaTokens=tokens.filter((token)=>token.x>=tableHeader.x-5);
+    const groups:PdfTextToken[][]=[];
+    for(const token of [...tableAreaTokens].sort((a,b)=>a.y-b.y||a.x-b.x)){
+      const group=groups.find((candidate)=>Math.abs(candidate[0].y-token.y)<=5);
+      if(group)group.push(token);else groups.push([token]);
+    }
+    const rows:PogRow[]=groups.map((group)=>{
+      const sorted=[...group].sort((a,b)=>a.x-b.x),joined=sorted.map((token)=>token.text).join(" ").replace(/\s+/g," ").trim();
+      const match=joined.match(/^(\d{1,4})[.)]?\s+([A-Z0-9-]{4,20})\s+(\d{6,20})\s+(.{2,})$/i);
+      return match?{number:Number(match[1]),sku:match[2],barcode:match[3],name:match[4].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/," ").trim(),y:group[0].y,page:pageNumber}:null;
+    }).filter((row):row is PogRow=>Boolean(row));
+    if(rows.length)allRows.push(...rows);if(rows.length<2||!tokens.some((token)=>/^notch\b/i.test(token.text)))continue;
+    const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader.x,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
+    const candidates=[
+      {x:0,y:0,width:tableLeft-14,height:viewport.height},
+      {x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height},
+      {x:0,y:0,width:viewport.width,height:tableTop-14},
+      {x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}
+    ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25).sort((a,b)=>b.width*b.height-a.width*a.height);
+    const crop=candidates[0];if(!crop)continue;
+    const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
+    const context=canvas.getContext("2d");if(!context)continue;
+    await page.render({canvas,canvasContext:context,viewport}).promise;
+    const markers=new Map<number,{x:number;y:number}>();
+    for(const token of tokens){
+      const number=Number(token.text.replace(/[.)]/g,""));
+      if(!Number.isInteger(number)||number<1||number>999||token.fontSize<5||markers.has(number))continue;
+      if(token.x>=crop.x&&token.x<=crop.x+crop.width&&token.y>=crop.y&&token.y<=crop.y+crop.height*.92)markers.set(number,{x:token.x,y:token.y});
+    }
+    pieces.push({canvas,crop,markers,page:pageNumber});
+  }
+  if(!pieces.length)return null;
+  const targetHeight=720,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),width=Math.max(1,Math.round(rawTotal*fit));
+  const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context)return null;
+  const positions:PogPosition[]=[],rendered:Array<{piece:typeof pieces[number];offset:number;scale:number}>=[];let offset=0;
+  pieces.forEach((piece,index)=>{
+    const pieceWidth=Math.round(rawWidths[index]*fit),scale=height/piece.crop.height;
+    context.drawImage(piece.canvas,piece.crop.x,piece.crop.y,piece.crop.width,piece.crop.height,offset,0,pieceWidth,height);
+    rendered.push({piece,offset,scale});
+    offset+=pieceWidth;
+  });
+  const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
+  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.9));
+  return {image,width,height,positions,sourcePages:pieces.map((piece)=>piece.page)};
+}
 
 function expiryStatus(value:string) {
   if (!value) return {label:"Chưa có HSD",tone:"muted"};
@@ -282,8 +347,10 @@ export default function Home() {
   const uploadPogFor = async (file:File|undefined,line:string,side:"A"|"B") => {
     if(!file)return; setBusy(true);
     try { const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);
-      const response=await fetch("/api/pog",{method:"POST",body:form});const result=await response.json() as {error?:string};if(!response.ok)throw new Error(result.error||"Không thể tải POG");
-      await loadData(true);setToast("Đã cập nhật POG "+line+side);
+      const analysis=await analyzePogPdf(file);
+      if(analysis){form.set("shelfImage",analysis.image,file.name.replace(/\.pdf$/i,"")+"-shelf.webp");form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));}
+      const response=await fetch("/api/pog",{method:"POST",body:form});const result=await response.json() as {error?:string;mappedCount?:number;analyzedPages?:number};if(!response.ok)throw new Error(result.error||"Không thể tải POG");
+      await loadData(true);setToast(analysis?`Đã ghép ${result.analyzedPages||analysis.sourcePages.length} trang · liên kết ${result.mappedCount||0} sản phẩm`:`Đã cập nhật POG ${line}${side} · PDF chưa có bảng chữ để tự phân tích`);
     } catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải POG");} finally{setBusy(false);if(pogRef.current)pogRef.current.value="";}
   };
   const uploadPog = async (file?:File) => { if(pogModal)await uploadPogFor(file,pogModal.line,pogModal.side); };
@@ -506,11 +573,16 @@ function SettingsModal({actor,users,theme,appLogo,logoSize,onLogo,onLogoSize,onT
 }
 function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload,uploadRef,onUpload,onPageChange,onPick,onClose}:{modal:{line:string;side:"A"|"B";selectedId?:string};setModal:(v:{line:string;side:"A"|"B";selectedId?:string})=>void;products:Product[];total:number;file?:PogFile;search:string;setSearch:(v:string)=>void;canUpload:boolean;uploadRef:React.RefObject<HTMLInputElement|null>;onUpload:(f?:File)=>void;onPageChange:(page:number)=>void;onPick:(p:Product)=>void;onClose:()=>void}) {
   const selected=products.find((p)=>p.id===modal.selectedId);
+  const linkedPositions=selected?file?.positions?.filter((position)=>normalize(position.sku)===normalize(selected.sku)||normalize(position.barcode)===normalize(selected.barcode||selected.supplierBarcode))||[]:[];
   const [pdfPage,setPdfPage]=useState(file?.page||1);
   const switchSide=(side:"A"|"B")=>{setSearch("");setPdfPage(1);setModal({line:modal.line,side})};
-  return <div className="modal-backdrop pog-backdrop"><section className="pog-modal"><div className="pog-head"><div><p>SƠ ĐỒ KỆ CHI TIẾT</p><h2>Line {modal.line} · {aisleNames[modal.line]||"Khu vực"}</h2></div><div className="side-switch"><button className={modal.side==="A"?"active":""} onClick={()=>switchSide("A")}>Mặt A</button><button className={modal.side==="B"?"active":""} onClick={()=>switchSide("B")}>Mặt B</button></div>{file?.mimeType==="application/pdf"&&<label className="pdf-page-picker">Trang sơ đồ<select value={pdfPage} onChange={(e)=>{const page=Number(e.target.value);setPdfPage(page);onPageChange(page)}}>{Array.from({length:12},(_,index)=><option key={index+1} value={index+1}>Trang {index+1}{index<2?" · thường dùng":""}</option>)}</select></label>}{canUpload&&<button className="upload-pog" title="Tải file POG PDF hoặc ảnh" onClick={()=>uploadRef.current?.click()}>↑ Tải POG PDF/ảnh</button>}<button className="close-pog" onClick={onClose}>×</button></div>
-    <div className="pog-body"><aside className="pog-list"><label>⌕<input value={search} onChange={(e)=>setSearch(e.target.value)} placeholder="Tìm SKU, barcode, tên…"/><b>{products.length}/{total} SP</b></label>{total>products.length&&<p className="pog-limit-note">Đang hiện 200 kết quả đầu · nhập SKU hoặc tên để tìm chính xác.</p>}<div>{products.map((p)=><button key={p.id} className={p.id===modal.selectedId?"active":""} onClick={()=>setModal({...modal,selectedId:p.id})}><span>Kệ {p.bay}</span><div><small>SKU {p.sku}</small><b>{p.name}</b><em>{p.supplierBarcode||p.barcode}</em></div><StockBadge stock={p.stock}/></button>)}{!products.length&&<div className="empty big">Chưa có sản phẩm ở mặt kệ này.</div>}</div>{selected&&<section className="pog-selected"><div><b>Line {selected.line}{selected.side} · Kệ {selected.bay}</b><span>{selected.name}</span><small>Tồn {selected.stock} · Loss {selected.loss} · HSD {selected.expDate||"chưa có"}</small></div><button disabled={selected.stock===0} onClick={()=>onPick(selected)}>+ Thêm vào đơn</button></section>}</aside><div className="pog-visual">{file?(file.mimeType==="application/pdf"?<iframe src={"/api/pog?id="+file.id+"#page="+pdfPage} title={"POG PDF trang "+pdfPage}/>:<img src={"/api/pog?id="+file.id} alt={"POG Line "+modal.line}/>):<ShelfPlan products={products} selectedId={modal.selectedId}/>} {file&&file.mimeType==="application/pdf"&&<div className="pog-page-badge">Đã lưu mặt kệ · Trang {pdfPage}</div>}{selected&&<div className="image-marker" style={{left:`${Math.min(91,8+selected.bay*10)}%`}}><i/><span>Kệ {selected.bay}<b>{selected.name}</b></span></div>}<div className="pog-file-label">{file?file.fileName:"Sơ đồ kệ tự động từ Master Data"}</div></div></div>
+  return <div className="modal-backdrop pog-backdrop"><section className="pog-modal"><div className="pog-head"><div><p>SƠ ĐỒ KỆ CHI TIẾT</p><h2>Line {modal.line} · {aisleNames[modal.line]||"Khu vực"}</h2></div><div className="side-switch"><button className={modal.side==="A"?"active":""} onClick={()=>switchSide("A")}>Mặt A</button><button className={modal.side==="B"?"active":""} onClick={()=>switchSide("B")}>Mặt B</button></div>{file?.mimeType==="application/pdf"&&!file.shelfImage&&<label className="pdf-page-picker">Trang sơ đồ<select value={pdfPage} onChange={(e)=>{const page=Number(e.target.value);setPdfPage(page);onPageChange(page)}}>{Array.from({length:12},(_,index)=><option key={index+1} value={index+1}>Trang {index+1}{index<2?" · thường dùng":""}</option>)}</select></label>}{file?.shelfImage&&<span className="pog-linked-count">Đã ghép · {file.positions?.length||0} vị trí</span>}{canUpload&&<button className="upload-pog" title="Tải file POG PDF hoặc ảnh" onClick={()=>uploadRef.current?.click()}>↑ Tải POG PDF/ảnh</button>}<button className="close-pog" onClick={onClose}>×</button></div>
+    <div className="pog-body"><aside className="pog-list"><label>⌕<input value={search} onChange={(e)=>setSearch(e.target.value)} placeholder="Tìm SKU, barcode, tên…"/><b>{products.length}/{total} SP</b></label>{total>products.length&&<p className="pog-limit-note">Đang hiện 200 kết quả đầu · nhập SKU hoặc tên để tìm chính xác.</p>}<div>{products.map((p)=><button key={p.id} className={p.id===modal.selectedId?"active":""} onClick={()=>setModal({...modal,selectedId:p.id})}><span>Kệ {p.bay}</span><div><small>SKU {p.sku}</small><b>{p.name}</b><em>{p.supplierBarcode||p.barcode}</em></div><StockBadge stock={p.stock}/></button>)}{!products.length&&<div className="empty big">Chưa có sản phẩm ở mặt kệ này.</div>}</div>{selected&&<section className="pog-selected"><div><b>Line {selected.line}{selected.side} · Kệ {selected.bay}</b><span>{selected.name}</span><small>{file?.shelfImage?(linkedPositions.length?`${linkedPositions.length} vị trí POG: ${linkedPositions.map((position)=>position.number).join(", ")}`:"Chưa tìm thấy STT trên ảnh POG")+" · ":""}Tồn {selected.stock} · Loss {selected.loss} · HSD {selected.expDate||"chưa có"}</small></div><button disabled={selected.stock===0} onClick={()=>onPick(selected)}>+ Thêm vào đơn</button></section>}</aside><div className="pog-visual">{file?(file.shelfImage?<PogShelfImage file={file} selected={selected} positions={linkedPositions}/>:file.mimeType==="application/pdf"?<iframe src={"/api/pog?id="+file.id+"#page="+pdfPage} title={"POG PDF trang "+pdfPage}/>:<img src={"/api/pog?id="+file.id} alt={"POG Line "+modal.line}/>):<ShelfPlan products={products} selectedId={modal.selectedId}/>} {file&&file.mimeType==="application/pdf"&&!file.shelfImage&&<div className="pog-page-badge">Đã lưu mặt kệ · Trang {pdfPage}</div>}{selected&&!file?.shelfImage&&<div className="image-marker" style={{left:`${Math.min(91,8+selected.bay*10)}%`}}><i/><span>Kệ {selected.bay}<b>{selected.name}</b></span></div>}<div className="pog-file-label">{file?file.fileName:"Sơ đồ kệ tự động từ Master Data"}</div></div></div>
     <input ref={uploadRef} hidden type="file" accept=".pdf,application/pdf,image/*" onChange={(e)=>onUpload(e.target.files?.[0])}/></section></div>;
+}
+function PogShelfImage({file,selected,positions}:{file:PogFile;selected?:Product;positions:PogPosition[]}) {
+  const width=file.shelfWidth||1600,height=file.shelfHeight||720;
+  return <svg className="pog-shelf-image" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${file.id}&asset=shelf`} width={width} height={height}/>{positions.map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width} ${position.y*height})`}><circle className="pog-marker-pulse" r="34"/><circle r="22"/><text y="7" textAnchor="middle">{position.number}</text></g>)}</svg>;
 }
 function ShelfPlan({products,selectedId}:{products:Product[];selectedId?:string}) {
   return <div className="shelf-plan">{Array.from({length:8},(_,index)=>index+1).map((bay)=><div key={bay}><span>KỆ {bay}</span><section>{products.filter((p)=>p.bay===bay).map((p)=><article key={p.id} className={p.id===selectedId?"active":""}><small>{p.sku}</small><b>{p.name.slice(0,24)}</b></article>)}</section></div>)}</div>;

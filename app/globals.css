@@ -50,6 +50,9 @@
 .pog-body{grid-template-columns:minmax(300px,.85fr) minmax(0,1.4fr)}
 .pog-visual{min-width:0}
 .pog-list{border-left:0;border-right:1px solid #d9dbd5}
+.pog-linked-count{padding:8px 11px;border:1px solid rgba(255,255,255,.28);border-radius:9px;background:rgba(255,255,255,.12);font-size:8px;font-weight:900;white-space:nowrap}
+.pog-shelf-image{display:block;width:100%;height:auto;max-height:calc(100vh - 125px);border-radius:13px;background:#fff;box-shadow:0 12px 35px rgba(20,38,30,.16)}
+.pog-svg-marker circle{fill:rgba(255,255,255,.12);stroke:#e40046;stroke-width:9;vector-effect:non-scaling-stroke}.pog-svg-marker circle:nth-of-type(2){fill:#fff;stroke-width:7}.pog-svg-marker text{fill:#c00057;font-size:18px;font-weight:950}.pog-marker-pulse{animation:pog-pulse 1.35s ease-out infinite;transform-box:fill-box;transform-origin:center}@keyframes pog-pulse{0%{opacity:.95;transform:scale(.72)}70%,100%{opacity:0;transform:scale(1.45)}}
 @media(max-width:520px){.ops-content{padding-left:12px;padding-right:12px}.user-chip{display:none}.check-grid{grid-template-columns:1fr}.metric-grid{gap:8px}.metric-grid button{min-height:110px}.metric-grid strong{font-size:25px}.table-wrap{border-radius:13px}.theme-row{grid-template-columns:repeat(2,1fr)}.modal-backdrop{padding:0}.form-modal,.settings-modal{height:100vh;max-height:none;border-radius:0}.order-list article{grid-template-columns:33px 1fr}.order-list article>.badge{display:none}.suggest-box button{padding:0 10px}.global-search input{font-size:10px}.pog-head .upload-pog{padding:7px 8px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 
