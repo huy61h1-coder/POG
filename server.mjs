@@ -124,6 +124,7 @@ function audit(state, actor, action) {
 
 const aiRateWindows = new Map();
 const aiIntentGroups = [
+  { triggers:["canh chua","canh chua ca","canh chua tom"], keywords:["ca","tom","thit","dau bam","ca chua","dua","bac ha","rau","gia vi","nuoc mam","me","chanh","ot","hanh","ngo"] },
   { triggers:["lau","hotpot"], keywords:["rau","nam","thit","hai san","tom","ca","mi","bun","sot","nuoc dung","do uong"] },
   { triggers:["nuong","bbq"], keywords:["thit","hai san","sot","gia vi","do uong","giay","khay"] },
   { triggers:["bua sang","an sang"], keywords:["sua","banh","ngu coc","ca phe","tra","trung"] },
@@ -198,7 +199,7 @@ const suggestionCache=new Map();
 function localProductSuggestions(query, products, notice = "") {
   const ranked = rankedProducts(query, products);
   const matching = ranked.filter((entry) => entry.score > 2.1);
-  const selected = (matching.length ? matching : ranked).slice(0,6);
+  const selected = (matching.length ? matching : ranked).slice(0,12);
   return {
     mode:"local",
     model:null,
@@ -241,13 +242,13 @@ async function openAiProductSuggestions(query, products) {
       method:"POST",signal:controller.signal,
       headers:{"content-type":"application/json","authorization":"Bearer "+apiKey},
       body:JSON.stringify({
-        model,store:false,max_output_tokens:1200,
+        model,store:false,max_output_tokens:1800,
         instructions:[
           "Bạn là trợ lý chọn sản phẩm cho nhân viên Fulfillment.",
           "Chỉ được chọn productId có trong DANH_SACH_SAN_PHAM; tuyệt đối không tự tạo sản phẩm.",
-          "Danh sách đã được lọc còn tồn và chưa hết hạn. Ưu tiên một bộ sản phẩm hữu ích, tránh trùng công dụng.",
+          "Danh sách đã được lọc còn tồn và chưa hết hạn. Với yêu cầu là một món ăn, hãy suy luận công thức phổ biến và chọn ĐẦY ĐỦ các nguyên liệu thiết yếu có trong danh sách (ví dụ canh chua cần đạm như cá/tôm, rau, quả tạo vị chua và gia vị). Không chỉ chọn một sản phẩm đại diện; có thể chọn nhiều sản phẩm thuộc các nhóm khác nhau.",
           "Trả lời bằng tiếng Việt. Lý do ngắn gọn, cụ thể và không quá 120 ký tự.",
-          "Số lượng là số nguyên từ 1 đến 20. Trả tối đa 8 sản phẩm."
+          "Số lượng là số nguyên từ 1 đến 20. Trả tối đa 12 sản phẩm; nếu có nhiều nguyên liệu phù hợp thì trả tất cả nguyên liệu thiết yếu đang có tồn."
         ].join("\n"),
         input:"NHU_CAU: "+query+"\nDANH_SACH_SAN_PHAM:\n"+JSON.stringify(catalog),
         text:{format:{
@@ -256,7 +257,7 @@ async function openAiProductSuggestions(query, products) {
             type:"object",additionalProperties:false,
             properties:{
               summary:{type:"string"},
-              items:{type:"array",maxItems:8,items:{
+              items:{type:"array",maxItems:12,items:{
                 type:"object",additionalProperties:false,
                 properties:{productId:{type:"string"},quantity:{type:"integer",minimum:1,maximum:20},reason:{type:"string"}},
                 required:["productId","quantity","reason"]
