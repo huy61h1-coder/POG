@@ -68,10 +68,10 @@ function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,token
   const dark=(x:number,y:number)=>{const index=(y*sw+x)*4;return pixels[index]<125&&pixels[index+1]<125&&pixels[index+2]<125;};
   const horizontal:number[]=[];for(let y=0;y<sh;y++){let ink=0;for(let x=0;x<sw;x+=2)if(dark(x,y))ink++;if(ink>=sw*.24)horizontal.push(sy+y);}
   const vertical:number[]=[];for(let x=0;x<sw;x++){let ink=0;for(let y=0;y<sh;y+=2)if(dark(x,y))ink++;if(ink>=sh*.24)vertical.push(sx+x);}
-  const top=[...horizontal].filter((value)=>value<=anchorTop+4).pop(),bottom=horizontal.find((value)=>value>=anchorBottom-4),left=[...vertical].filter((value)=>value<=anchorLeft+4).pop(),right=vertical.find((value)=>value>=anchorRight-4);
+  const top=horizontal.find((value)=>value<=anchorTop+4),bottom=[...horizontal].filter((value)=>value>=anchorBottom-4).pop(),left=vertical.find((value)=>value<=anchorLeft+4),right=[...vertical].filter((value)=>value>=anchorRight-4).pop();
   const fallback={x:Math.max(initial.x,anchorLeft-24),y:Math.max(initial.y,anchorTop-24),width:Math.min(initial.x+initial.width,anchorRight+24)-Math.max(initial.x,anchorLeft-24),height:Math.min(initial.y+initial.height,anchorBottom+24)-Math.max(initial.y,anchorTop-24)};
   if(top===undefined||bottom===undefined||left===undefined||right===undefined||right-left<initial.width*.35||bottom-top<initial.height*.35)return fallback;
-  return {x:Math.max(initial.x,left-3),y:Math.max(initial.y,top-3),width:Math.min(initial.x+initial.width,right+3)-Math.max(initial.x,left-3),height:Math.min(initial.y+initial.height,bottom+3)-Math.max(initial.y,top-3)};
+  return {x:Math.max(initial.x,left-1),y:Math.max(initial.y,top-1),width:Math.min(initial.x+initial.width,right+1)-Math.max(initial.x,left-1),height:Math.min(initial.y+initial.height,bottom+1)-Math.max(initial.y,top-1)};
 }
 
 async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
