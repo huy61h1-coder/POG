@@ -81,7 +81,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
   const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number}>=[],allRows:PogRow[]=[];
   for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
-    const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:1.35}),textContent=await page.getTextContent();
+    const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:2.4}),textContent=await page.getTextContent();
     const tokens:PdfTextToken[]=[];
     for(const item of textContent.items){
       if(!("str" in item)||!item.str.trim())continue;
@@ -112,16 +112,17 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     const context=canvas.getContext("2d");if(!context)continue;
     await page.render({canvas,canvasContext:context,viewport}).promise;
     const productCrop=cropShelfToProductBorder(canvas,crop,tokens);if(!productCrop)continue;crop=productCrop;
+    const shelfCanvas=document.createElement("canvas");shelfCanvas.width=Math.max(1,Math.ceil(crop.width));shelfCanvas.height=Math.max(1,Math.ceil(crop.height));const shelfContext=shelfCanvas.getContext("2d");if(!shelfContext)continue;shelfContext.drawImage(canvas,crop.x,crop.y,crop.width,crop.height,0,0,shelfCanvas.width,shelfCanvas.height);
     const markers=new Map<number,{x:number;y:number}>();
     for(const token of tokens){
       const number=Number(token.text.replace(/[.)]/g,""));
       if(!Number.isInteger(number)||number<1||number>999||token.fontSize<5||markers.has(number))continue;
-      if(token.x>=crop.x&&token.x<=crop.x+crop.width&&token.y>=crop.y&&token.y<=crop.y+crop.height*.92)markers.set(number,{x:token.x,y:token.y});
+      if(token.x>=crop.x&&token.x<=crop.x+crop.width&&token.y>=crop.y&&token.y<=crop.y+crop.height*.92)markers.set(number,{x:token.x-crop.x,y:token.y-crop.y});
     }
-    pieces.push({canvas,crop,markers,page:pageNumber});
+    pieces.push({canvas:shelfCanvas,crop:{x:0,y:0,width:shelfCanvas.width,height:shelfCanvas.height},markers,page:pageNumber});
   }
   if(!pieces.length)return null;
-  const targetHeight=720,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
+  const targetHeight=1800,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
   const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context)return null;
   const positions:PogPosition[]=[],rendered:Array<{piece:typeof pieces[number];offset:number;scale:number}>=[];let offset=0;
   pieces.forEach((piece,index)=>{
@@ -131,7 +132,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     offset+=pieceWidth-1;
   });
   const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
-  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.9));
+  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.97));
   return {image,width,height,positions,sourcePages:pieces.map((piece)=>piece.page)};
 }
 
