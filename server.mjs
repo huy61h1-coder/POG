@@ -291,6 +291,8 @@ async function openAiProductSuggestions(query, products) {
 class StateStore {
   queue = Promise.resolve();
   localState = null;
+  remoteState = null;
+  remoteStateAt = 0;
   async init() {
     mkdirSync(uploadDir, { recursive: true });
     mkdirSync(importDir, { recursive: true });
@@ -322,13 +324,13 @@ class StateStore {
     }
   }
   async read() {
-    if (pool) return ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<3000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
     if(!this.localState)this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8")));
     return this.localState;
   }
   async save(state) {
-    if (pool) await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
-    else { try{await writeLocalState(state);this.localState=state;}catch(error){this.localState=null;throw error;} }
+    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products); }
+    else { try{await writeLocalState(state);this.localState=state;productApiCache.delete(state.products);}catch(error){this.localState=null;throw error;} }
   }
   async mutate(callback) {
     const run = async () => {
@@ -340,7 +342,7 @@ class StateStore {
           const state = ensureStateShape(result.rows[0].state);
           const value = await callback(state);
           await client.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
-          await client.query("COMMIT");
+          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products);
           return value;
         } catch (error) {
           await client.query("ROLLBACK");
