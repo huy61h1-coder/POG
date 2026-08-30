@@ -37,6 +37,19 @@ async function waitForServer(){
   throw new Error("Server did not start: "+lastError);
 }
 
+async function waitForImport(cookie,jobId){
+  let last;
+  for(let attempt=0;attempt<300;attempt++){
+    const response=await fetch(origin+"/api/master-data/import/"+encodeURIComponent(jobId),{headers:{cookie}});
+    assert.equal(response.status,200);
+    last=await response.json();
+    if(last.status==="completed")return last;
+    if(last.status==="failed")throw new Error("Import failed: "+last.error);
+    await new Promise((resolve)=>setTimeout(resolve,50));
+  }
+  throw new Error("Import did not finish: "+JSON.stringify(last));
+}
+
 async function stopServer(){
   if(server&&!server.killed){
     const exited=new Promise((resolve)=>server.once("exit",resolve));
@@ -77,7 +90,7 @@ try{
   assert.equal(setupResponse.status,200);
   const cookie=(setupResponse.headers.get("set-cookie")||"").split(";")[0];
   assert.match(cookie,/^fulfillment_session=/);
-  const first=await fetch(origin+"/api/store",{headers:{cookie}});
+  const first=await fetch(origin+"/api/store?includeProducts=1",{headers:{cookie}});
   const data=await first.json();
   assert.equal(data.actor.role,"ADMIN");
   assert.equal(data.actor.username,"admin.test");
@@ -85,10 +98,22 @@ try{
   assert.equal(data.products.length,3);
   assert.equal(data.products[0].divisionName,"HOME & LIVING");
   assert.equal(data.products[0].supplierBarcode,"45497410531914");
+  const compact=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  assert.equal(compact.products.length,0);
+  assert.equal(compact.productTotal,3);
+  assert.equal(compact.productStats.total,3);
+  const paged=await (await fetch(origin+"/api/products?page=1&pageSize=2",{headers:{cookie}})).json();
+  assert.equal(paged.products.length,2);
+  assert.equal(paged.total,3);
+  assert.equal(paged.pageSize,2);
+  const expiryPage=await (await fetch(origin+"/api/products?sort=expiry&pageSize=3",{headers:{cookie}})).json();
+  assert.equal(expiryPage.products[0].id,"p2");
   const product=data.products[0],headers={"content-type":"application/json",cookie};
+  const addOutOfStock=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"addPick",productId:"p3",quantity:1})});
+  assert.equal(addOutOfStock.status,409);
   await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"addPick",productId:product.id,quantity:2})});
   await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"addPick",productId:product.id,quantity:1})});
-  const updated=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  const updated=await (await fetch(origin+"/api/store?includeProducts=1",{headers:{cookie}})).json();
   assert.equal(updated.actor.userId,data.actor.userId);
   assert.equal(updated.picking[0].quantity,3);
 
@@ -139,12 +164,16 @@ try{
   const masterForm=new FormData();
   masterForm.set("file",new Blob([workbook],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"master-data.xlsx");
   const masterResponse=await fetch(origin+"/api/master-data/import",{method:"POST",headers:{cookie:staffCookie},body:masterForm});
-  assert.equal(masterResponse.status,200);
-  const masterResult=await masterResponse.json();
+  assert.equal(masterResponse.status,202);
+  const acceptedJob=await masterResponse.json();
+  assert.match(acceptedJob.jobId,/^[0-9a-f-]+$/i);
+  const completedJob=await waitForImport(staffCookie,acceptedJob.jobId);
+  assert.equal(completedJob.percent,100);
+  const masterResult=completedJob.result;
   assert.equal(masterResult.created,1);
   assert.equal(masterResult.updated,1);
   assert.equal(masterResult.skipped,0);
-  const afterMaster=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  const afterMaster=await (await fetch(origin+"/api/store?includeProducts=1",{headers:{cookie}})).json();
   const preserved=afterMaster.products.find((item)=>item.id==="p1");
   assert.equal(preserved.name,"SẢN PHẨM CẬP NHẬT TỪ EXCEL");
   assert.equal(preserved.supplierBarcode,"490000000001");
@@ -162,8 +191,24 @@ try{
   assert.equal(editProduct.status,200);
   const deleteProduct=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"deleteProduct",id:importedProduct.id})});
   assert.equal(deleteProduct.status,200);
-  const afterDelete=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  const afterDelete=await (await fetch(origin+"/api/store?includeProducts=1",{headers:{cookie}})).json();
   assert.equal(afterDelete.products.some((item)=>item.id===importedProduct.id),false);
+
+  const bulkRows=[masterHeaders];
+  for(let index=1;index<=12000;index++)bulkRows.push(["BULK"+String(index).padStart(6,"0"),"SẢN PHẨM KIỂM THỬ LỚN "+index,"10","FOOD","1001","BULK TEST","893"+String(index).padStart(10,"0"),String(index%28+1).padStart(2,"0"),"LINE TEST"]);
+  const bulkForm=new FormData();bulkForm.set("file",new Blob([createXlsx(bulkRows)],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"master-data-12000.xlsx");
+  const bulkResponse=await fetch(origin+"/api/master-data/import",{method:"POST",headers:{cookie:staffCookie,"x-import-id":"9cb534fe-a240-4d7a-9811-5f809d24ec89"},body:bulkForm});
+  assert.equal(bulkResponse.status,202);
+  const bulkAccepted=await bulkResponse.json();
+  const [healthDuringImport,pageDuringImport]=await Promise.all([fetch(origin+"/healthz"),fetch(origin+"/api/products?pageSize=5",{headers:{cookie}})]);
+  assert.equal(healthDuringImport.status,200);
+  assert.equal(pageDuringImport.status,200);
+  const bulkCompleted=await waitForImport(staffCookie,bulkAccepted.jobId);
+  assert.equal(bulkCompleted.result.imported,12000);
+  assert.equal(bulkCompleted.result.totalProducts,12003);
+  const compactAfterBulk=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  assert.equal(compactAfterBulk.products.length,0);
+  assert.equal(compactAfterBulk.productTotal,12003);
   const disableManager=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:staffAccount.userId,active:false}})});
   assert.equal(disableManager.status,200);
   assert.equal((await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).status,401);
@@ -176,5 +221,5 @@ try{
   const missing=await fetch(origin+"/api/does-not-exist");
   assert.equal(missing.status,404);
   assert.match(missing.headers.get("content-type")||"",/^application\/json/);
-  console.log("Smoke tests passed: page, health, identity, picking, grounded AI, AI fallback, Excel import, API 404");
+  console.log("Smoke tests passed: page, health, identity, picking, grounded AI, async 12k-row Excel import, pagination, API 404");
 }finally{await stopServer()}

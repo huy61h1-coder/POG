@@ -1,19 +1,22 @@
 import express from "express";
 import multer from "multer";
 import { Pool } from "pg";
-import { readSheet } from "read-excel-file/node";
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, promises as fs } from "node:fs";
+import { once } from "node:events";
+import { createReadStream, existsSync, mkdirSync, promises as fs } from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { mergeMasterRecords, normalizeMasterProduct, parseMasterDataRows } from "./lib/master-data.mjs";
+import { Worker } from "node:worker_threads";
+import { normalizeMasterProduct } from "./lib/master-data.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 3000);
 const dataDir = path.resolve(root, process.env.DATA_DIR || "data");
 const uploadDir = path.resolve(root, process.env.UPLOAD_DIR || path.join(dataDir,"uploads"));
+const importDir = path.join(dataDir,"master-imports");
 const statePath = path.join(dataDir, "store.json");
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
 const scryptAsync = promisify(scryptCallback);
@@ -42,6 +45,25 @@ function initialState() {
     accounts: [], sessions: [], roles: [], logs: [], picking: [], pogFiles: [],
     lineConfigs: lineDefaults.map(([line,name,color,logo]) => ({ line,name,color,logo,updatedAt:now })),
   };
+}
+
+async function writeLocalState(state) {
+  const tempPath=path.join(path.dirname(statePath),".store-"+randomUUID()+".tmp"),handle=await fs.open(tempPath,"w",0o600);
+  try {
+    const entries=Object.entries(state);await handle.write("{");
+    for(let entryIndex=0;entryIndex<entries.length;entryIndex++){
+      const [key,value]=entries[entryIndex];if(entryIndex)await handle.write(",");await handle.write(JSON.stringify(key)+":");
+      if(key==="products"&&Array.isArray(value)){
+        await handle.write("[");
+        for(let index=0;index<value.length;index+=1000){const batch=value.slice(index,index+1000).map((item)=>JSON.stringify(item)).join(",");await handle.write((index?",":"")+batch);}
+        await handle.write("]");
+      }else await handle.write(JSON.stringify(value));
+    }
+    await handle.write("}");await handle.sync();
+  } catch(error){await handle.close();await fs.unlink(tempPath).catch(()=>undefined);throw error;}
+  await handle.close();
+  try { await fs.rename(tempPath,statePath); }
+  catch(error){await fs.unlink(tempPath).catch(()=>undefined);throw error;}
 }
 
 function asText(value, fallback = "") { return typeof value === "string" ? value.trim() : fallback; }
@@ -109,6 +131,27 @@ const aiIntentGroups = [
 function availableProducts(products) {
   const today = new Date().toISOString().slice(0,10);
   return products.filter((product) => product.stock > 0 && (!product.expDate || product.expDate >= today));
+}
+
+function productSummary(products) {
+  const today=new Date();today.setHours(0,0,0,0);const soon=today.getTime()+30*86400000;
+  const stats={total:0,outCount:0,lowCount:0,totalLoss:0,expiring:0},alerts=[],lines=new Set();
+  for(const product of products){
+    stats.total++;if(product.stock===0)stats.outCount++;if(product.stock>0&&product.stock<10)stats.lowCount++;stats.totalLoss+=Number(product.loss)||0;lines.add(product.line);
+    const expiry=product.expDate?new Date(product.expDate+"T00:00:00").getTime():Infinity;
+    if(expiry<=soon)stats.expiring++;
+    if(alerts.length<6&&(product.stock<10||product.loss>0||expiry<=soon))alerts.push(product);
+  }
+  return {stats,alerts,lines:[...lines].sort((a,b)=>Number(a)-Number(b))};
+}
+const productSummaryCache=new WeakMap(),productSearchCache=new WeakMap();
+function getProductSummary(products){let summary=productSummaryCache.get(products);if(!summary){summary=productSummary(products);productSummaryCache.set(products,summary);}return summary;}
+function productSearchText(product){let value=productSearchCache.get(product);if(!value){value=normalizeText([product.name,product.sku,product.barcode,product.supplierBarcode,product.division,product.divisionName,product.department,product.departmentName,product.line,product.lineName,product.side].join(" "));productSearchCache.set(product,value);}return value;}
+function expiryRank(product){if(!product.expDate)return 0;const value=Date.parse(product.expDate+"T00:00:00");return Number.isFinite(value)?value:Number.MAX_SAFE_INTEGER;}
+function pushExpiryTop(heap,product,limit){
+  if(limit<=0)return;const entry={product,rank:expiryRank(product)},later=(a,b)=>a.rank>b.rank||(a.rank===b.rank&&String(a.product.sku)>String(b.product.sku));
+  if(heap.length<limit){heap.push(entry);let index=heap.length-1;while(index>0){const parent=Math.floor((index-1)/2);if(!later(heap[index],heap[parent]))break;[heap[index],heap[parent]]=[heap[parent],heap[index]];index=parent;}return;}
+  if(!later(heap[0],entry))return;heap[0]=entry;let index=0;for(;;){const left=index*2+1,right=left+1;let largest=index;if(left<heap.length&&later(heap[left],heap[largest]))largest=left;if(right<heap.length&&later(heap[right],heap[largest]))largest=right;if(largest===index)break;[heap[index],heap[largest]]=[heap[largest],heap[index]];index=largest;}
 }
 
 function intentTerms(query) {
@@ -220,8 +263,15 @@ async function openAiProductSuggestions(query, products) {
 
 class StateStore {
   queue = Promise.resolve();
+  localState = null;
   async init() {
     mkdirSync(uploadDir, { recursive: true });
+    mkdirSync(importDir, { recursive: true });
+    const staleBefore=Date.now()-6*60*60_000;
+    for(const entry of await fs.readdir(importDir,{withFileTypes:true})){
+      if(!entry.isFile()||!/^[0-9a-f-]+\.(?:xlsx|result\.json(?:\.part)?)$/i.test(entry.name))continue;
+      const candidate=path.join(importDir,entry.name),stat=await fs.stat(candidate).catch(()=>null);if(stat&&stat.mtimeMs<staleBefore)await fs.unlink(candidate).catch(()=>undefined);
+    }
     if (pool) {
       await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_state (id BOOLEAN PRIMARY KEY DEFAULT TRUE, state JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
       await pool.query("INSERT INTO fulfillment_state (id,state) VALUES (TRUE,$1::jsonb) ON CONFLICT (id) DO NOTHING", [JSON.stringify(initialState())]);
@@ -246,11 +296,12 @@ class StateStore {
   }
   async read() {
     if (pool) return ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);
-    return ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8")));
+    if(!this.localState)this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8")));
+    return this.localState;
   }
   async save(state) {
     if (pool) await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
-    else await fs.writeFile(statePath, JSON.stringify(state, null, 2));
+    else { try{await writeLocalState(state);this.localState=state;}catch(error){this.localState=null;throw error;} }
   }
   async mutate(callback) {
     const run = async () => {
@@ -270,9 +321,8 @@ class StateStore {
         } finally { client.release(); }
       }
       const state = await this.read();
-      const value = await callback(state);
-      await this.save(state);
-      return value;
+      try { const value = await callback(state);await this.save(state);return value; }
+      catch(error){this.localState=null;throw error;}
     };
     const task = this.queue.then(run, run);
     this.queue = task.catch(() => undefined);
@@ -286,7 +336,7 @@ app.disable("x-powered-by");
 if(production)app.set("trust proxy",1);
 app.use(express.json({ limit: "2mb" }));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-const masterUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: masterImportMaxFileBytes, files:1 } });
+const masterUpload = multer({ storage: multer.diskStorage({destination:(_req,_file,done)=>{mkdirSync(importDir,{recursive:true});done(null,importDir);},filename:(_req,_file,done)=>done(null,randomUUID()+".xlsx")}), limits: { fileSize: masterImportMaxFileBytes, files:1 } });
 app.use((req,res,next)=>{
   const cookies=Object.fromEntries((req.headers.cookie||"").split(";").map((part)=>part.trim().split(/=(.*)/s).slice(0,2)).filter(([key])=>key));
   req.fulfillmentSessionId=decodeURIComponent(asText(cookies.fulfillment_session));
@@ -306,6 +356,129 @@ function actorFrom(req, state) {
   if(!session)return null;
   const account=state.accounts.find((item)=>item.id===session.accountId&&item.active!==false);
   return account?publicAccount(account):null;
+}
+
+async function requireManager(req,res,next) {
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);
+    if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    if(!canManage(actor.role))return res.status(403).json({error:"Cần quyền Manager hoặc Admin"});
+    req.fulfillmentActor=actor;
+    next();
+  } catch(error){next(error);}
+}
+
+const importIdPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function requireImportCapacity(req,res,next) {
+  const requestedId=asText(req.headers["x-import-id"]),existing=importIdPattern.test(requestedId)?masterJobs.get(requestedId):null;
+  if(existing&&existing.ownerId===req.fulfillmentActor.userId)return next();
+  const active=[...masterJobs.values()].filter((job)=>["queued","processing"].includes(job.status));
+  if(active.some((job)=>job.ownerId===req.fulfillmentActor.userId))return res.status(409).json({error:"Tài khoản đang có một file Master Data được xử lý"});
+  if(active.length>=3)return res.status(503).json({error:"Hệ thống đang xử lý nhiều file Excel. Vui lòng thử lại sau."});
+  next();
+}
+
+const masterJobs=new Map(),masterJobQueue=[];
+let masterJobRunning=false;
+
+function publicMasterJob(job) {
+  return {
+    jobId:job.id,status:job.status,phase:job.phase,percent:job.percent,
+    processedRows:job.processedRows||0,totalRows:job.totalRows||0,fileName:job.fileName,
+    createdAt:job.createdAt,updatedAt:job.updatedAt,result:job.result||null,error:job.error||"",
+  };
+}
+
+function updateMasterJob(job,patch) {
+  Object.assign(job,patch,{updatedAt:Date.now()});
+}
+
+function pruneMasterJobs() {
+  const finished=[...masterJobs.values()].filter((job)=>["completed","failed"].includes(job.status)).sort((a,b)=>b.updatedAt-a.updatedAt);
+  for(const job of finished.slice(50))masterJobs.delete(job.id);
+}
+
+function runMasterWorker(job,resultPath) {
+  return new Promise((resolve,reject)=>{
+    const worker=new Worker(new URL("./workers/master-import-worker.mjs",import.meta.url),{
+      workerData:{filePath:job.filePath,resultPath,maxRows:masterImportMaxRows},
+      resourceLimits:{maxOldGenerationSizeMb:1024},
+    });
+    let settled=false;
+    const timeout=setTimeout(()=>void fail(new Error("Xử lý file vượt quá 30 phút và đã được dừng"),true),30*60_000);
+    const succeed=(value)=>{if(settled)return;settled=true;clearTimeout(timeout);resolve(value);};
+    const fail=async(error,terminate=false)=>{if(settled)return;settled=true;clearTimeout(timeout);if(terminate)await worker.terminate().catch(()=>undefined);reject(error);};
+    worker.on("message",(message)=>{
+      if(message?.type==="progress")updateMasterJob(job,{status:"processing",phase:message.phase,percent:Math.max(job.percent||0,Number(message.percent)||0),processedRows:Number(message.processedRows)||0,totalRows:Number(message.totalRows)||0});
+      if(message?.type==="done")succeed(message.resultPath);
+      if(message?.type==="error")void fail(new Error(asText(message.error,"Không thể xử lý file Excel")),true);
+    });
+    worker.on("error",(error)=>void fail(error));
+    worker.on("exit",(code)=>{if(!settled)void fail(new Error("Tiến trình đọc Excel đã dừng mà chưa tạo kết quả (mã "+code+")"));});
+  });
+}
+
+const masterFields=["sku","name","division","divisionName","department","departmentName","supplierBarcode","line","lineName"];
+const yieldToServer=()=>new Promise((resolve)=>setImmediate(resolve));
+async function mergeMasterResultFile(products,resultPath,job) {
+  const nextProducts=products.slice(),indexBySku=new Map();
+  for(let index=0;index<nextProducts.length;index++){
+    const key=asText(nextProducts[index]?.sku).toUpperCase();if(key&&!indexBySku.has(key))indexBySku.set(key,index);
+    if(index>0&&index%5000===0)await yieldToServer();
+  }
+  const reader=createInterface({input:createReadStream(resultPath,{encoding:"utf8"}),crlfDelay:Infinity});
+  let metadata=null,created=0,updated=0,unchanged=0,processed=0;
+  for await(const line of reader){
+    if(!line)continue;
+    if(!metadata){metadata=JSON.parse(line);continue;}
+    const source=JSON.parse(line),sku=asText(source.sku),key=sku.toUpperCase();if(!key)continue;
+    const master={sku,name:asText(source.name),division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode:asText(source.supplierBarcode),line:cleanLine(source.line),lineName:asText(source.lineName)};
+    const index=indexBySku.get(key);
+    if(index===undefined){indexBySku.set(key,nextProducts.length);nextProducts.push({...master,id:randomUUID(),barcode:master.supplierBarcode,side:"A",bay:1,price:0,stock:0,loss:0,expDate:"",updatedAt:Date.now()});created++;}
+    else {const current=nextProducts[index],changed=masterFields.some((field)=>asText(current?.[field])!==master[field])||asText(current?.barcode)!==master.supplierBarcode;if(changed){nextProducts[index]={...current,...master,barcode:master.supplierBarcode,updatedAt:Date.now()};updated++;}else unchanged++;}
+    processed++;
+    if(processed%2000===0){const percent=70+Math.round(processed/Math.max(1,job.totalRows||processed)*16);updateMasterJob(job,{phase:"Đang hợp nhất Master Data",percent:Math.min(86,percent),processedRows:processed,totalRows:job.totalRows||processed});await yieldToServer();}
+  }
+  if(!metadata)throw new Error("Không tìm thấy kết quả đọc Master Data");
+  return {products:nextProducts,metadata,created,updated,unchanged,imported:processed};
+}
+
+async function runMasterJob(job) {
+  const resultPath=path.join(importDir,job.id+".result.json");
+  try {
+    updateMasterJob(job,{status:"processing",phase:"Đang khởi động bộ xử lý nền",percent:8});
+    await runMasterWorker(job,resultPath);
+    updateMasterJob(job,{status:"processing",phase:"Đang hợp nhất Master Data",percent:70});
+    const result=await store.mutate(async(state)=>{
+      const account=state.accounts.find((item)=>item.id===job.ownerId&&item.active!==false);
+      if(!account||!canManage(account.role))throw new Error("Tài khoản không còn quyền cập nhật Master Data");
+      const actor=publicAccount(account),merged=await mergeMasterResultFile(state.products,resultPath,job),parsed=merged.metadata;
+      updateMasterJob(job,{phase:"Đang lưu dữ liệu sản phẩm",percent:88});state.products=merged.products;
+      audit(state,actor,"Nhập Excel Master Data: "+merged.created+" mới, "+merged.updated+" cập nhật, "+parsed.skipped+" bỏ qua");
+      return {fileName:job.fileName,created:merged.created,updated:merged.updated,unchanged:merged.unchanged,imported:merged.imported,totalProducts:state.products.length,headerRow:parsed.headerRow,skipped:parsed.skipped,duplicates:parsed.duplicates,issues:parsed.issues};
+    });
+    updateMasterJob(job,{status:"completed",phase:"Hoàn tất",percent:100,processedRows:result.imported,totalRows:result.imported,result});
+  } catch(error) {
+    const raw=error instanceof Error?error.message:"Không thể xử lý file Excel";
+    const friendly=/^(File Excel|Thiếu cột|File vượt|Không tìm|Tài khoản|Xử lý file)/.test(raw)?raw:"Không thể đọc file Excel. Hãy kiểm tra lại định dạng .xlsx.";
+    updateMasterJob(job,{status:"failed",phase:"Nhập dữ liệu thất bại",error:friendly});
+  } finally {
+    await Promise.allSettled([fs.unlink(job.filePath),fs.unlink(resultPath),fs.unlink(resultPath+".part")]);
+    pruneMasterJobs();
+  }
+}
+
+async function runNextMasterJob() {
+  if(masterJobRunning)return;
+  const job=masterJobQueue.shift();if(!job)return;
+  masterJobRunning=true;
+  try { await runMasterJob(job); }
+  finally { masterJobRunning=false;void runNextMasterJob(); }
+}
+
+function enqueueMasterJob(job) {
+  masterJobQueue.push(job);
+  void runNextMasterJob();
 }
 
 const loginRateWindows=new Map();
@@ -360,18 +533,64 @@ app.post("/api/auth/logout", async(req,res,next)=>{
 
 app.get("/api/store", async (req, res, next) => {
   try {
-    const data = await store.mutate((state) => {
-      const actor = actorFrom(req, state);
-      if(!actor)return {error:"Vui lòng đăng nhập",status:401,setupRequired:state.accounts.length===0};
-      const picking = state.picking.filter((item) => item.userId === actor.userId).map((item) => {
-        const product = state.products.find((p) => p.id === item.productId);
-        return product ? { ...product, quantity: item.quantity, picked: item.picked } : null;
-      }).filter(Boolean);
-      const users=(actor.role==="ADMIN"?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount);
-      return { actor, products: state.products, logs: state.logs.slice(0,80), picking, users, pogFiles: state.pogFiles, lineConfigs: state.lineConfigs };
-    });
+    const state=await store.read(),actor=actorFrom(req,state);
+    if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập",setupRequired:state.accounts.length===0});
+    const picking=state.picking.filter((item)=>item.userId===actor.userId).map((item)=>{const product=state.products.find((p)=>p.id===item.productId);return product?{...product,quantity:item.quantity,picked:item.picked}:null;}).filter(Boolean);
+    const users=(actor.role==="ADMIN"?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount),summary=getProductSummary(state.products);
+    const data={actor,products:req.query.includeProducts==="1"?state.products:[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs};
     res.status(data.status||200).json(data);
   } catch (error) { next(error); }
+});
+
+app.get("/api/products", async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const id=asText(req.query.id);
+    if(id){const product=state.products.find((item)=>item.id===id);return product?res.json({products:[product],total:1,page:1,pageSize:1}):res.status(404).json({error:"Không tìm thấy sản phẩm"});}
+    const query=normalizeText(asText(req.query.q).slice(0,200)),line=asText(req.query.line),side=asText(req.query.side),stock=asText(req.query.stock,"all"),sort=asText(req.query.sort),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize;
+    if(!query&&(!line||line==="all")&&!side&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize),total:state.products.length,page,pageSize,matchedLines:[]});
+    const passesFilters=(product)=>{
+      if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;
+      if(stock==="available"&&product.stock<=0)return false;if(stock==="low"&&!(product.stock>0&&product.stock<10))return false;if(stock==="out"&&product.stock!==0)return false;
+      return !query||productSearchText(product).includes(query);
+    };
+    if(sort==="expiry"){
+      let total=0,scanned=0;const heap=[],matchedLines=new Set(),limit=start+pageSize;
+      for(const product of state.products){if(++scanned%5000===0){await yieldToServer();if(req.destroyed)return;}if(!passesFilters(product))continue;total++;matchedLines.add(product.line);pushExpiryTop(heap,product,limit);}
+      const ordered=heap.sort((a,b)=>a.rank-b.rank||String(a.product.sku).localeCompare(String(b.product.sku))).map((entry)=>entry.product);
+      return res.set("Cache-Control","no-store").json({products:ordered.slice(start,start+pageSize),total,page,pageSize,matchedLines:[...matchedLines]});
+    }
+    let total=0,ordinarySeen=0,scanned=0;const matches=[],exact=[],matchedLines=new Set();
+    for(const product of state.products){
+      if(++scanned%5000===0){await yieldToServer();if(req.destroyed)return;}if(!passesFilters(product))continue;
+      total++;matchedLines.add(product.line);
+      const isExact=query&&(normalizeText(product.sku)===query||normalizeText(product.barcode)===query||normalizeText(product.supplierBarcode)===query);
+      if(isExact){exact.push(product);continue;}
+      if(ordinarySeen>=start&&matches.length<pageSize)matches.push(product);ordinarySeen++;
+    }
+    if(exact.length){
+      matches.length=0;let orderedIndex=0;
+      for(const product of exact){if(orderedIndex>=start&&matches.length<pageSize)matches.push(product);orderedIndex++;}
+      if(matches.length<pageSize){let rescanned=0;for(const product of state.products){
+        if(++rescanned%5000===0){await yieldToServer();if(req.destroyed)return;}
+        if(!passesFilters(product))continue;
+        if(normalizeText(product.sku)===query||normalizeText(product.barcode)===query||normalizeText(product.supplierBarcode)===query)continue;
+        if(orderedIndex>=start&&matches.length<pageSize)matches.push(product);orderedIndex++;if(matches.length>=pageSize)break;
+      }}
+    }
+    res.set("Cache-Control","no-store").json({products:matches,total,page,pageSize,matchedLines:[...matchedLines]});
+  } catch(error){next(error);}
+});
+
+app.get("/api/master-data/export.csv",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"';
+    res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=MasterData_Fulfillment.csv","Cache-Control":"no-store"});
+    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"].map(csvCell).join(",")+"\n");
+    for(const product of state.products){const row=[product.sku,product.name,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.line,product.lineName].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
+    res.end();
+  } catch(error){next(error);}
 });
 
 app.post("/api/store", async (req, res, next) => {
@@ -426,21 +645,21 @@ app.post("/api/store", async (req, res, next) => {
         const supplierBarcode=asText(source.supplierBarcode)||asText(source.barcode);
         const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:supplierBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price)),stock:Math.max(0,asInt(source.stock)),loss:Math.max(0,asInt(source.loss)),expDate:asText(source.expDate),updatedAt:Date.now()};
         if(index>=0) state.products[index]=product; else state.products.unshift(product);
-        audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
+        productSummaryCache.delete(state.products);audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
       }
       if (action === "deleteProduct") {
         if (!canManage(actor.role)) return fail("Cần quyền Manager hoặc Admin",403);
         const index=state.products.findIndex((p)=>p.id===asText(body.id));
-        if(index>=0){const [item]=state.products.splice(index,1);state.picking=state.picking.filter((p)=>p.productId!==item.id);audit(state,actor,"Xóa sản phẩm SKU "+item.sku);} return {ok:true};
+        if(index>=0){const [item]=state.products.splice(index,1);state.picking=state.picking.filter((p)=>p.productId!==item.id);productSummaryCache.delete(state.products);audit(state,actor,"Xóa sản phẩm SKU "+item.sku);} return {ok:true};
       }
       if (action === "adjustStock" || action === "adjustLoss" || action === "updateDate") {
         const product=state.products.find((p)=>p.id===asText(body.id)); if(!product)return fail("Không tìm thấy sản phẩm",404);
         if(action==="adjustStock"){product.stock=Math.max(0,product.stock+asInt(body.delta));audit(state,actor,"Cập nhật tồn SKU "+product.sku);}
         if(action==="adjustLoss"){product.loss=Math.max(0,product.loss+asInt(body.delta));audit(state,actor,"Cập nhật loss SKU "+product.sku);}
         if(action==="updateDate"){product.expDate=asText(body.expDate);audit(state,actor,"Cập nhật HSD SKU "+product.sku);}
-        product.updatedAt=Date.now();return {ok:true};
+        product.updatedAt=Date.now();productSummaryCache.delete(state.products);return {ok:true};
       }
-      if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1)));if(!state.products.some((p)=>p.id===productId))return fail("Không tìm thấy sản phẩm",404);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;}else state.picking.push({userId:actor.userId,productId,quantity,picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
+      if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1))),product=state.products.find((p)=>p.id===productId);if(!product)return fail("Không tìm thấy sản phẩm",404);if(product.stock<=0)return fail("Sản phẩm đang hết hàng",409);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;}else state.picking.push({userId:actor.userId,productId,quantity,picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
       if(action==="updatePickQuantity"){const item=state.picking.find((p)=>p.userId===actor.userId&&p.productId===asText(body.productId));if(!item)return fail("Sản phẩm không còn trong đơn",404);item.quantity=Math.max(1,Math.min(99,asInt(body.quantity,1)));item.picked=false;audit(state,actor,"Cập nhật số lượng cần lấy");return {ok:true};}
       if(action==="togglePick"){const item=state.picking.find((p)=>p.userId===actor.userId&&p.productId===asText(body.productId));if(item)item.picked=!item.picked;audit(state,actor,"Cập nhật trạng thái lấy hàng");return {ok:true};}
       if(action==="removePick"){state.picking=state.picking.filter((p)=>!(p.userId===actor.userId&&p.productId===asText(body.productId)));audit(state,actor,"Bỏ sản phẩm khỏi đơn soạn");return {ok:true};}
@@ -452,35 +671,30 @@ app.post("/api/store", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/master-data/import", masterUpload.single("file"), async (req, res, next) => {
+app.post("/api/master-data/import", requireManager, requireImportCapacity, masterUpload.single("file"), async (req, res, next) => {
   try {
-    const accessState=await store.read(),accessActor=actorFrom(req,accessState);
-    if(!accessActor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    if(!canManage(accessActor.role))return res.status(403).json({error:"Cần quyền Manager hoặc Admin"});
     if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel .xlsx"});
-    if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
-    if(req.file.buffer.length<4||req.file.buffer[0]!==0x50||req.file.buffer[1]!==0x4b)return res.status(400).json({error:"File .xlsx không hợp lệ hoặc đã bị hỏng"});
-
-    let parsed;
-    try {
-      const rows=await readSheet(req.file.buffer);
-      parsed=parseMasterDataRows(rows,{maxRows:masterImportMaxRows});
-    } catch(error) {
-      const message=error instanceof Error&&/^(File Excel|Thiếu cột|File vượt|Không tìm)/.test(error.message)?error.message:"Không thể đọc file Excel. Hãy kiểm tra lại định dạng .xlsx.";
-      return res.status(422).json({error:message});
-    }
-
-    const result=await store.mutate((state)=>{
-      const actor=actorFrom(req,state);
-      if(!actor)return {error:"Vui lòng đăng nhập",status:401};
-      if(!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};
-      const merged=mergeMasterRecords(state.products,parsed.records,{createId:randomUUID,now:Date.now()});
-      state.products=merged.products;
-      audit(state,actor,"Nhập Excel Master Data: "+merged.created+" mới, "+merged.updated+" cập nhật, "+parsed.skipped+" bỏ qua");
-      return {ok:true,fileName:req.file.originalname,created:merged.created,updated:merged.updated,unchanged:merged.unchanged,imported:parsed.records.length,totalProducts:state.products.length,headerRow:parsed.headerRow,skipped:parsed.skipped,duplicates:parsed.duplicates,issues:parsed.issues};
-    });
-    res.status(result.status||200).json(result);
+    const removeUpload=()=>fs.unlink(req.file.path).catch(()=>undefined);
+    if(!req.file.originalname.toLowerCase().endsWith(".xlsx")){await removeUpload();return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});}
+    const handle=await fs.open(req.file.path,"r");let signature;
+    try { signature=Buffer.alloc(4);await handle.read(signature,0,4,0); } finally { await handle.close(); }
+    if(req.file.size<4||signature[0]!==0x50||signature[1]!==0x4b){await removeUpload();return res.status(400).json({error:"File .xlsx không hợp lệ hoặc đã bị hỏng"});}
+    const requestedId=asText(req.headers["x-import-id"]),jobId=importIdPattern.test(requestedId)?requestedId:randomUUID(),existing=masterJobs.get(jobId);
+    if(existing){await removeUpload();if(existing.ownerId!==req.fulfillmentActor.userId)return res.status(409).json({error:"Mã lần nhập đã được sử dụng"});return res.status(202).json(publicMasterJob(existing));}
+    const now=Date.now(),job={id:jobId,ownerId:req.fulfillmentActor.userId,fileName:req.file.originalname,filePath:req.file.path,status:"queued",phase:"Đã nhận file, đang chờ xử lý",percent:5,processedRows:0,totalRows:0,createdAt:now,updatedAt:now,result:null,error:""};
+    masterJobs.set(job.id,job);
+    res.status(202).set("Location","/api/master-data/import/"+job.id).json(publicMasterJob(job));
+    enqueueMasterJob(job);
   } catch(error) { next(error); }
+});
+
+app.get("/api/master-data/import/:jobId",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const job=masterJobs.get(asText(req.params.jobId));if(!job)return res.status(404).json({error:"Không tìm thấy lần nhập dữ liệu này"});
+    if(job.ownerId!==actor.userId&&actor.role!=="ADMIN")return res.status(403).json({error:"Bạn không có quyền xem lần nhập này"});
+    res.set("Cache-Control","no-store").json(publicMasterJob(job));
+  } catch(error){next(error);}
 });
 
 app.post("/api/ai/suggest", async (req, res, next) => {
@@ -509,11 +723,8 @@ app.get("/api/pog", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/pog", upload.single("file"), async (req, res, next) => {
+app.post("/api/pog", requireManager, upload.single("file"), async (req, res, next) => {
   try {
-    const accessState=await store.read(),accessActor=actorFrom(req,accessState);
-    if(!accessActor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    if(!canManage(accessActor.role))return res.status(403).json({error:"Cần quyền Manager hoặc Admin"});
     if(!req.file)return res.status(400).json({error:"Thiếu tệp"});
     if(!req.file.mimetype.startsWith("image/")&&req.file.mimetype!=="application/pdf")return res.status(400).json({error:"Chỉ nhận ảnh hoặc PDF"});
     const result=await store.mutate(async(state)=>{
