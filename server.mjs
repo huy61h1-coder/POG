@@ -187,11 +187,13 @@ function intentTerms(query) {
 function rankedProducts(query, products) {
   const terms = intentTerms(query);
   return availableProducts(products).map((product) => {
-    const haystack = normalizeText([product.name,product.sku,product.barcode,product.supplierBarcode,product.division,product.divisionName,product.department,product.departmentName,product.line,product.lineName,product.side].join(" "));
+    const haystack = productSearchText(product);
     const score = terms.reduce((total,term) => total + (haystack.includes(term) ? (term.length > 3 ? 5 : 2) : 0),0) + Math.min(2,product.stock/20);
     return { product, score };
   }).sort((a,b) => b.score-a.score || b.product.stock-a.product.stock);
 }
+
+const suggestionCache=new Map();
 
 function localProductSuggestions(query, products, notice = "") {
   const ranked = rankedProducts(query, products);
@@ -790,12 +792,16 @@ app.post("/api/ai/suggest", async (req, res, next) => {
     if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const query=asText(req.body?.query).slice(0,500);
     if(query.length<2)return res.status(400).json({error:"Hãy mô tả nhu cầu bằng ít nhất 2 ký tự."});
+    const cacheKey=normalizeText(query)+"|"+asInt(state.stockImport?.updatedAt,0),cached=suggestionCache.get(cacheKey);
+    if(cached&&cached.expiresAt>Date.now())return res.set("Cache-Control","no-store").json(cached.result);
     if(asText(process.env.OPENAI_API_KEY)){
       const retryAfter=takeAiQuota(actor.userId);
       if(retryAfter){res.set("Retry-After",String(retryAfter));return res.status(429).json({error:"Bạn đang phân tích quá nhanh. Vui lòng thử lại sau "+retryAfter+" giây."});}
     }
-    const result=await openAiProductSuggestions(query,state.products.map((product)=>withUploadedStock(product,stockIndex(state.stockRecords))).filter((product)=>product.stockKnown));
-    res.set("Cache-Control","no-store").json({...result,productCount:state.stockRecords.length});
+    const suggestions=await openAiProductSuggestions(query,state.products.map((product)=>withUploadedStock(product,stockIndex(state.stockRecords))).filter((product)=>product.stockKnown));
+    const result={...suggestions,productCount:state.stockRecords.length};
+    suggestionCache.set(cacheKey,{result,expiresAt:Date.now()+60_000});if(suggestionCache.size>100){const oldest=suggestionCache.keys().next().value;if(oldest)suggestionCache.delete(oldest);}
+    res.set("Cache-Control","no-store").json(result);
   } catch (error) { next(error); }
 });
 
