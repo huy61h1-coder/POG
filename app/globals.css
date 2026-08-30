@@ -145,3 +145,23 @@
 .app-logo-setting{margin:0 22px 18px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#faf8f9;display:flex;align-items:center;gap:9px;flex-wrap:wrap}.app-logo-setting img{width:220px;height:58px;object-fit:contain;object-position:left center;background:#fff;border-radius:8px}.app-logo-setting label{position:relative;overflow:hidden;cursor:pointer}.app-logo-setting input{position:absolute;inset:0;opacity:0;cursor:pointer}.app-logo-setting small{width:100%;color:var(--muted);font-size:9px;line-height:1.45}
 .logo-size-control{width:100%;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:10px;font-weight:700}.logo-size-control b{color:var(--brand)}.logo-size-control input{position:static!important;opacity:1!important;flex:1;accent-color:var(--brand)}
 @media(max-width:800px){.ops-brand img{width:58px;height:42px}}
+
+/* Stable picking-card layout: keep status and picked controls in separate cells */
+.order-list article{grid-template-columns:46px 132px 40px minmax(220px,1fr) auto auto auto auto}
+.order-list article>.availability-toggle{grid-column:2;grid-row:1}
+.order-list article>.pick-check{grid-column:3;grid-row:1}
+.order-list article>.pick-product-thumb{grid-column:1;grid-row:1}
+.order-list article>.pick-product-thumb+button+button+div{grid-column:4;grid-row:1}
+@media(max-width:1050px){
+  .order-list article{grid-template-columns:46px 132px 40px minmax(180px,1fr)}
+  .order-list article>.pick-quantity,.order-list article>.badge,.order-list article>button:not(.pick-check):not(.availability-toggle){grid-column:4}
+}
+@media(max-width:620px){
+  .order-list article{grid-template-columns:42px minmax(0,1fr) 40px;align-items:start}
+  .order-list article>.pick-product-thumb{grid-column:1;grid-row:1}
+  .order-list article>.pick-product-thumb+button+button+div{grid-column:2;grid-row:1}
+  .order-list article>.pick-check{grid-column:3;grid-row:1;width:40px;height:40px}
+  .order-list article>.availability-toggle{grid-column:2/4;grid-row:2;width:100%;margin-top:3px;flex-direction:row}
+  .order-list article>.pick-quantity,.order-list article>.badge,.order-list article>button:not(.pick-check):not(.availability-toggle){grid-column:2/4}
+  .order-list article>.badge{display:inline-flex}
+}
