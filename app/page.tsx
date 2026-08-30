@@ -50,6 +50,28 @@ function StockBadge({stock,known=true}:{stock:number;known?:boolean}) {
   return <span className={"badge " + (stock === 0 ? "danger" : stock < 10 ? "warning" : "success")}>{stock === 0 ? "Hết hàng" : stock < 10 ? "Sắp hết · " + stock : "Còn hàng · " + stock}</span>;
 }
 
+function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDetected:(value:string)=>void;onError:(message:string)=>void}) {
+  const videoRef=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),frameRef=useRef<number>(0);
+  const [status,setStatus]=useState("Đang mở camera…");const [manual,setManual]=useState("");
+  useEffect(()=>{
+    let stopped=false;
+    const stop=()=>{if(frameRef.current)cancelAnimationFrame(frameRef.current);streamRef.current?.getTracks().forEach((track)=>track.stop());streamRef.current=null;};
+    const start=async()=>{
+      try {
+        if(!navigator.mediaDevices?.getUserMedia)throw new Error("Trình duyệt không hỗ trợ camera. Hãy dùng máy quét USB hoặc nhập mã.");
+        const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});if(stopped){stream.getTracks().forEach((track)=>track.stop());return;}
+        streamRef.current=stream;const video=videoRef.current;if(!video)return;video.srcObject=stream;await video.play();
+        const Detector=(window as unknown as {BarcodeDetector?:new(options?:{formats?:string[]})=>{detect:(source:ImageBitmapSource)=>Promise<Array<{rawValue?:string}>>}}).BarcodeDetector;
+        if(!Detector){setStatus("Camera đã mở. Trình duyệt chưa hỗ trợ tự nhận mã; nhập mã bên dưới hoặc dùng máy quét USB.");return;}
+        const detector=new Detector({formats:["ean_13","ean_8","code_128","code_39","upc_a","upc_e","qr_code"]});setStatus("Đưa barcode vào giữa khung hình…");
+        const scan=async()=>{if(stopped||!videoRef.current)return;try{const found=await detector.detect(videoRef.current);const value=found.find((item)=>item.rawValue)?.rawValue;if(value){stop();onDetected(value);return;}}catch{ /* next frame can retry */ }frameRef.current=requestAnimationFrame(()=>void scan());};void scan();
+      } catch(cause) { const message=cause instanceof Error?cause.message:"Không thể mở camera";setStatus(message);onError(message); }
+    };
+    void start();return()=>{stopped=true;stop();};
+  },[onDetected,onError]);
+  return <div className="modal-backdrop barcode-modal"><section className="scanner-card" role="dialog" aria-modal="true" aria-label="Quét barcode"><div className="modal-head"><div><p>QUÉT SẢN PHẨM</p><h2>Quét barcode</h2></div><button onClick={onClose}>×</button></div><div className="scanner-video"><video ref={videoRef} muted playsInline/><span className="scanner-frame"/></div><p>{status}</p><form className="scanner-manual" onSubmit={(event)=>{event.preventDefault();if(manual.trim())onDetected(manual.trim());}}><input value={manual} onChange={(event)=>setManual(event.target.value)} placeholder="Hoặc nhập / quét bằng máy quét USB"/><button className="primary" disabled={!manual.trim()}>Tìm</button></form><button className="ghost scanner-close" onClick={onClose}>Đóng</button></section></div>;
+}
+
 export default function Home() {
   const [data,setData] = useState<StoreData|null>(null);
   const [authMode,setAuthMode] = useState<"login"|"setup"|null>(null);
@@ -70,6 +92,7 @@ export default function Home() {
   const [suggestResult,setSuggestResult] = useState<AiSuggestionResult|null>(null);
   const [suggestBusy,setSuggestBusy] = useState(false);
   const [suggestError,setSuggestError] = useState("");
+  const [scannerOpen,setScannerOpen] = useState(false);
   const [masterImport,setMasterImport] = useState<MasterImportResult|null>(null);
   const [importJob,setImportJob] = useState<MasterImportJob|null>(null);
   const [stockImportJob,setStockImportJob] = useState<StockImportJob|null>(null);
@@ -233,7 +256,8 @@ export default function Home() {
 
   const openProductOnMap = (product:Product) => { setPogModal({line:product.line,side:product.side,selectedId:product.id});setPogSearch(product.sku);setQuery("");setProductPage(1); };
   const quickAdd = async (product:Product) => { if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}if(await mutate("addPick",{productId:product.id,quantity:1})){setQuery("");setProductPage(1);} };
-  const handleSearchEnter = async () => { const value=query.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact);else if(payload.products[0])openProductOnMap(payload.products[0]);else setToast("Không tìm thấy sản phẩm");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
+  const handleBarcode = async (rawValue:string) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact);else if(payload.products[0])openProductOnMap(payload.products[0]);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
+  const handleSearchEnter = async () => { await handleBarcode(query); };
   const uploadPog = async (file?:File) => {
     if(!file||!pogModal)return; setBusy(true);
     try { const form=new FormData();form.set("file",file);form.set("line",pogModal.line);form.set("side",pogModal.side);
@@ -269,6 +293,7 @@ export default function Home() {
         <button className="ops-brand" onClick={()=>{setTab("DASHBOARD");setProductPage(1);}}><b>AEON</b><span>FULFILLMENT<br/>SMARTOPS</span></button>
         <div className="global-search">
           <span>⌕</span><input value={query} onChange={(e)=>{setQuery(e.target.value);setProductPage(1);}} onKeyDown={(e)=>{if(e.key==="Enter")void handleSearchEnter()}} placeholder="Tìm hoặc quét SKU, barcode…" />
+          <button className="barcode-trigger" title="Quét barcode bằng camera" aria-label="Quét barcode bằng camera" onClick={()=>setScannerOpen(true)}>▣</button>
           {query&&<button onClick={()=>{setQuery("");setProductPage(1);}}>×</button>}
           {query.length>=2&&<div className="search-popover">{productsLoading?<div className="search-empty"><i className="mini-spinner"/><b>Đang tìm sản phẩm…</b></div>:<>{searchMatches.map((p)=><article key={p.id}><button className="search-result-main" onClick={()=>openProductOnMap(p)}><span><b>{p.name}</b><small>SKU {p.sku} · Line {p.line}{p.side} · Kệ {p.bay}</small></span><StockBadge stock={p.stock}/></button><button className="search-quick-add" disabled={p.stock===0} onClick={()=>void quickAdd(p)}>+ Đơn</button></article>)}{!searchMatches.length&&<div className="search-empty"><b>Không tìm thấy sản phẩm</b><span>Kiểm tra lại SKU, barcode hoặc tên hàng.</span></div>}</>}</div>}
         </div>
@@ -303,6 +328,7 @@ export default function Home() {
       {settingsOpen&&<SettingsModal actor={data.actor} users={data.users} theme={theme} onTheme={setTheme} onCreate={(account)=>mutate("createAccount",{account})} onUpdate={(account)=>mutate("updateAccount",{account})} onPassword={(currentPassword,newPassword)=>mutate("changeOwnPassword",{currentPassword,newPassword})} onLogout={logout} onClose={()=>setSettingsOpen(false)}/>}
       {lineModal&&<LineConfigModal value={lineModal} onChange={setLineModal} onClose={()=>setLineModal(null)} onSave={async()=>{if(await mutate("updateLineConfig",{lineConfig:lineModal}))setLineModal(null);}}/>}
       {pogModal&&<PogModal modal={pogModal} setModal={setPogModal} products={visiblePogProducts} total={visiblePogTotal} file={activePog} search={pogSearch} setSearch={setPogSearch} canUpload={canManage(data.actor.role)} uploadRef={pogRef} onUpload={(file)=>void uploadPog(file)} onPick={(product)=>void quickAdd(product)} onClose={()=>setPogModal(null)}/>}
+      {scannerOpen&&<BarcodeScannerModal onClose={()=>setScannerOpen(false)} onDetected={(value)=>{setScannerOpen(false);setQuery(value);void handleBarcode(value);}} onError={setToast}/>} 
     </main>
   );
 }
