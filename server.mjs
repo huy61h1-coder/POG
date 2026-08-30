@@ -834,14 +834,15 @@ app.get("/api/pog", async (req, res, next) => {
 app.post("/api/pog", requireManager, upload.single("file"), async (req, res, next) => {
   try {
     if(!req.file)return res.status(400).json({error:"Thiếu tệp"});
-    if(!req.file.mimetype.startsWith("image/")&&req.file.mimetype!=="application/pdf")return res.status(400).json({error:"Chỉ nhận ảnh hoặc PDF"});
+    const isPdf=req.file.mimetype==="application/pdf"||/\.pdf$/i.test(req.file.originalname),isImage=req.file.mimetype.startsWith("image/");
+    if(!isImage&&!isPdf)return res.status(400).json({error:"Chỉ nhận ảnh hoặc PDF"});
     const result=await store.mutate(async(state)=>{
       const actor=actorFrom(req,state);if(!actor)return {error:"Vui lòng đăng nhập",status:401};if(!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};
       const line=cleanLine(req.body.line),side=asText(req.body.side,"A")==="B"?"B":"A",id=line+"_"+side,safeName=req.file.originalname.replace(/[^a-zA-Z0-9._-]/g,"-").slice(-100),fileKey=Date.now()+"-"+createHash("sha1").update(req.file.buffer).digest("hex").slice(0,10)+"-"+safeName;
       await fs.writeFile(path.join(uploadDir,fileKey),req.file.buffer);const index=state.pogFiles.findIndex((item)=>item.id===id);
-      const item={id,line,side,fileKey,fileName:req.file.originalname,mimeType:req.file.mimetype,updatedAt:Date.now()};
+      const item={id,line,side,fileKey,fileName:req.file.originalname,mimeType:isPdf?"application/pdf":req.file.mimetype,updatedAt:Date.now()};
       if(index>=0)state.pogFiles[index]=item;else state.pogFiles.push(item);
-      audit(state,actor,"Cập nhật POG Line "+line+" mặt "+side+": "+req.file.originalname);return {ok:true,id,fileName:req.file.originalname,mimeType:req.file.mimetype};
+      audit(state,actor,"Cập nhật POG Line "+line+" mặt "+side+": "+req.file.originalname);return {ok:true,id,fileName:req.file.originalname,mimeType:item.mimeType};
     });
     res.status(result.status||200).json(result);
   } catch (error) { next(error); }
