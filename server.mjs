@@ -166,9 +166,10 @@ function productSummary(products,stockRecords=[],manualChecks=[]) {
   }
   return {stats,alerts,lines:[...lines].sort((a,b)=>Number(a)-Number(b))};
 }
-const productSearchCache=new WeakMap();
+const productSearchCache=new WeakMap(),productLookupCache=new WeakMap();
 function getProductSummary(state){return productSummary(state.products,state.stockRecords,state.manualChecks);}
 function productSearchText(product){let value=productSearchCache.get(product);if(!value){value=normalizeText([product.name,product.sku,product.barcode,product.supplierBarcode,product.division,product.divisionName,product.department,product.departmentName,product.line,product.lineName,product.side].join(" "));productSearchCache.set(product,value);}return value;}
+function productLookup(products){let lookup=productLookupCache.get(products);if(!lookup){lookup=new Map();for(const product of products){for(const value of [product.sku,product.barcode,product.supplierBarcode]){const key=normalizeText(value);if(key&&!lookup.has(key))lookup.set(key,product);}}productLookupCache.set(products,lookup);}return lookup;}
 function expiryRank(product){if(!product.expDate)return 0;const value=Date.parse(product.expDate+"T00:00:00");return Number.isFinite(value)?value:Number.MAX_SAFE_INTEGER;}
 function pushExpiryTop(heap,product,limit){
   if(limit<=0)return;const entry={product,rank:expiryRank(product)},later=(a,b)=>a.rank>b.rank||(a.rank===b.rank&&String(a.product.sku)>String(b.product.sku));
@@ -598,6 +599,7 @@ app.get("/api/products", async(req,res,next)=>{
     const uploaded=stockIndex(state.stockRecords);
     if(id){const product=state.products.find((item)=>item.id===id);return product?res.json({products:[withUploadedStock(product,uploaded)],total:1,page:1,pageSize:1}):res.status(404).json({error:"Không tìm thấy sản phẩm"});}
     const query=normalizeText(asText(req.query.q).slice(0,200)),line=asText(req.query.line),side=asText(req.query.side),stock=asText(req.query.stock,"all"),sort=asText(req.query.sort),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize;
+    if(query&&!line&&!side&&stock==="all"&&!sort){const exact=productLookup(state.products).get(query);if(exact){const product=withUploadedStock(exact,uploaded);return res.set("Cache-Control","no-store").json({products:[product],total:1,page:1,pageSize:1,matchedLines:[product.line]});}}
     if(!query&&(!line||line==="all")&&!side&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total:state.products.length,page,pageSize,matchedLines:[]});
     const passesFilters=(product)=>{
       if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;

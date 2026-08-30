@@ -108,6 +108,7 @@ export default function Home() {
   const excelRef = useRef<HTMLInputElement>(null);
   const stockExcelRef = useRef<HTMLInputElement>(null);
   const pogRef = useRef<HTMLInputElement>(null);
+  const searchCacheRef = useRef(new Map<string,ProductPage>());
   const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
 
   const loadData = useCallback(async (quiet=false) => {
@@ -133,14 +134,18 @@ export default function Home() {
   useEffect(() => { if (!toast) return; const timer=window.setTimeout(()=>setToast(""),2600); return ()=>window.clearTimeout(timer); },[toast]);
   useEffect(()=>{
     if(!actorUserId)return;
+    if(query.trim().length===1)return;
     const requestKey=[tab,query.trim(),lineFilter,stockFilter,productPage,productRefresh].join("|");
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
       setProductsBusy(true);
       try {
         const params=new URLSearchParams({page:String(productPage),pageSize:"100",stock:tab==="MAP"?"all":stockFilter});
         if(query.trim())params.set("q",query.trim());if(tab!=="MAP"&&lineFilter!=="all")params.set("line",lineFilter);if(tab==="DATE")params.set("sort","expiry");
-        const response=await fetch((tab==="CHECK_STOCK"?"/api/stock?":"/api/products?")+params,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage&{error?:string};
+        const endpoint=(tab==="CHECK_STOCK"?"/api/stock?":"/api/products?")+params,cacheKey=endpoint;
+        const cached=searchCacheRef.current.get(cacheKey);if(cached){setProductResult(cached);setProductResultKey(requestKey);setProductsBusy(false);return;}
+        const response=await fetch(endpoint,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage&{error?:string};
         if(!response.ok)throw new Error(payload.error||"Không thể tải danh sách sản phẩm");
+        if(searchCacheRef.current.size>80)searchCacheRef.current.delete(searchCacheRef.current.keys().next().value as string);searchCacheRef.current.set(cacheKey,payload);
         setProductResult(payload);setProductResultKey(requestKey);
         const lastPage=Math.max(1,Math.ceil(payload.total/payload.pageSize));if(productPage>lastPage)setProductPage(lastPage);
       } catch(cause){if(!controller.signal.aborted)setToast(cause instanceof Error?cause.message:"Không thể tải danh sách sản phẩm");}
