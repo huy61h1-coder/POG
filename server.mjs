@@ -608,13 +608,13 @@ app.get("/api/products", async(req,res,next)=>{
     const id=asText(req.query.id);
     const uploaded=stockIndex(state.stockRecords);
     if(id){const product=state.products.find((item)=>item.id===id);return product?res.json({products:[withUploadedStock(product,uploaded)],total:1,page:1,pageSize:1}):res.status(404).json({error:"Không tìm thấy sản phẩm"});}
-    const query=normalizeText(asText(req.query.q).slice(0,200)),line=asText(req.query.line),side=asText(req.query.side),stock=asText(req.query.stock,"all"),sort=asText(req.query.sort),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize;
-    const cacheKey=[query,line,side,stock,sort,page,pageSize,asInt(state.stockImport?.updatedAt,0)].join("|");
+    const query=normalizeText(asText(req.query.q).slice(0,200)),line=asText(req.query.line),side=asText(req.query.side),stock=asText(req.query.stock,"all"),sort=asText(req.query.sort),skuValues=asText(req.query.skus).slice(0,20000).split(",").map(normalizeText).filter(Boolean),skuSet=new Set(skuValues),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize;
+    const cacheKey=[query,line,side,stock,sort,skuValues.join(","),page,pageSize,asInt(state.stockImport?.updatedAt,0)].join("|");
     const apiCache=getProductApiCache(state.products),cached=apiCache.get(cacheKey);if(cached)return res.set("Cache-Control","no-store").json(cached);
-    if(query&&!line&&!side&&stock==="all"&&!sort){const exact=productLookup(state.products).get(query);if(exact){const product=withUploadedStock(exact,uploaded);return res.set("Cache-Control","no-store").json({products:[product],total:1,page:1,pageSize:1,matchedLines:[product.line]});}}
-    if(!query&&(!line||line==="all")&&!side&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total:state.products.length,page,pageSize,matchedLines:[]});
+    if(query&&!line&&!side&&!skuSet.size&&stock==="all"&&!sort){const exact=productLookup(state.products).get(query);if(exact){const product=withUploadedStock(exact,uploaded);return res.set("Cache-Control","no-store").json({products:[product],total:1,page:1,pageSize:1,matchedLines:[product.line]});}}
+    if(!query&&(!line||line==="all")&&!side&&!skuSet.size&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total:state.products.length,page,pageSize,matchedLines:[]});
     const passesFilters=(product)=>{
-      if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;
+      if(skuSet.size&&!skuSet.has(normalizeText(product.sku)))return false;if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;
       const current=uploaded.get(normalizeText(product.sku));
       if(stock==="available"&&!(current?.stock>0))return false;if(stock==="low"&&!(current?.stock>0&&current.stock<10))return false;if(stock==="out"&&current?.stock!==0)return false;
       return !query||productSearchText(product).includes(query);
