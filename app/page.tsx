@@ -297,7 +297,7 @@ export default function Home() {
       {toast&&<div className="toast">{toast}</div>}
       {busy&&<div className="busy-line"/>}
       <header className="ops-topbar">
-        <button className="ops-brand" onClick={()=>{setTab("DASHBOARD");setProductPage(1);}}><b>AEON</b><span>FULFILLMENT<br/>SMARTOPS</span></button>
+        <button className="ops-brand" aria-label="AEON Fulfillment SmartOps" onClick={()=>{setTab("DASHBOARD");setProductPage(1);}}><img src="/aeon-logo.svg" alt="AEON Fulfillment SmartOps"/></button>
         <div className="global-search">
           <span>⌕</span><input value={query} onChange={(e)=>{setQuery(e.target.value);setProductPage(1);}} onKeyDown={(e)=>{if(e.key==="Enter")void handleSearchEnter()}} placeholder="Tìm hoặc quét SKU, barcode…" />
           <button className="barcode-trigger" title="Quét barcode bằng camera" aria-label="Quét barcode bằng camera" onClick={()=>setScannerOpen(true)}>▣</button>
