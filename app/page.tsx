@@ -101,13 +101,12 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     }).filter((row):row is PogRow=>Boolean(row));
     if(rows.length)allRows.push(...rows);if(rows.length<2||!tokens.some((token)=>/^notch\b/i.test(token.text)))continue;
     const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader.x,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
-    const candidates=[
-      {x:0,y:0,width:tableLeft-14,height:viewport.height},
+    const leftShelf={x:0,y:0,width:tableLeft-14,height:viewport.height},candidates=[
       {x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height},
       {x:0,y:0,width:viewport.width,height:tableTop-14},
       {x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}
     ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25).sort((a,b)=>b.width*b.height-a.width*a.height);
-    let crop=candidates[0];if(!crop)continue;
+    let crop=leftShelf.width>viewport.width*.25?leftShelf:candidates[0];if(!crop)continue;
     const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
     const context=canvas.getContext("2d");if(!context)continue;
     await page.render({canvas,canvasContext:context,viewport}).promise;
@@ -121,14 +120,14 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     pieces.push({canvas,crop,markers,page:pageNumber});
   }
   if(!pieces.length)return null;
-  const targetHeight=720,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),width=Math.max(1,Math.round(rawTotal*fit));
+  const targetHeight=720,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
   const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context)return null;
   const positions:PogPosition[]=[],rendered:Array<{piece:typeof pieces[number];offset:number;scale:number}>=[];let offset=0;
   pieces.forEach((piece,index)=>{
     const pieceWidth=Math.round(rawWidths[index]*fit),scale=height/piece.crop.height;
     context.drawImage(piece.canvas,piece.crop.x,piece.crop.y,piece.crop.width,piece.crop.height,offset,0,pieceWidth,height);
     rendered.push({piece,offset,scale});
-    offset+=pieceWidth;
+    offset+=pieceWidth-1;
   });
   const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
   const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.9));
