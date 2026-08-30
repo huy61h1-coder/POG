@@ -325,7 +325,7 @@ export default function Home() {
         </section>
       </div>
 
-      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span>{item.icon}</span>{item.label}</button>)}</nav>
+      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","CHECK_STOCK","STOCK","LOSS","DATE","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span>{item.icon}</span>{item.label}</button>)}</nav>
       <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importExcel(e.target.files?.[0])}/>
       <input ref={stockExcelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importStockExcel(e.target.files?.[0])}/>
 
