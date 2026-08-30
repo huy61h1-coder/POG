@@ -51,18 +51,18 @@ function StockBadge({stock,known=true}:{stock:number;known?:boolean}) {
 }
 
 function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDetected:(value:string)=>void;onError:(message:string)=>void}) {
-  const videoRef=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),frameRef=useRef<number>(0);
+  const videoRef=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),frameRef=useRef<number>(0),zxingRef=useRef<{stop:()=>void}|null>(null);
   const [status,setStatus]=useState("Đang mở camera…");const [manual,setManual]=useState("");
   useEffect(()=>{
     let stopped=false;
-    const stop=()=>{if(frameRef.current)cancelAnimationFrame(frameRef.current);streamRef.current?.getTracks().forEach((track)=>track.stop());streamRef.current=null;};
+    const stop=()=>{if(frameRef.current)cancelAnimationFrame(frameRef.current);zxingRef.current?.stop();zxingRef.current=null;streamRef.current?.getTracks().forEach((track)=>track.stop());streamRef.current=null;};
     const start=async()=>{
       try {
         if(!navigator.mediaDevices?.getUserMedia)throw new Error("Trình duyệt không hỗ trợ camera. Hãy dùng máy quét USB hoặc nhập mã.");
         const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});if(stopped){stream.getTracks().forEach((track)=>track.stop());return;}
         streamRef.current=stream;const video=videoRef.current;if(!video)return;video.srcObject=stream;await video.play();
         const Detector=(window as unknown as {BarcodeDetector?:new(options?:{formats?:string[]})=>{detect:(source:ImageBitmapSource)=>Promise<Array<{rawValue?:string}>>}}).BarcodeDetector;
-        if(!Detector){setStatus("Camera đã mở. Trình duyệt chưa hỗ trợ tự nhận mã; nhập mã bên dưới hoặc dùng máy quét USB.");return;}
+        if(!Detector){setStatus("Đang tải bộ nhận diện barcode…");const {BrowserMultiFormatReader}=await import("@zxing/browser");if(stopped)return;const reader=new BrowserMultiFormatReader();setStatus("Đang nhận diện barcode…");const controls=await reader.decodeFromStream(stream,video,(result)=>{const value=result?.getText();if(value){stop();onDetected(value);}});if(!stopped)zxingRef.current=controls;return;}
         const detector=new Detector({formats:["ean_13","ean_8","code_128","code_39","upc_a","upc_e","qr_code"]});setStatus("Đưa barcode vào giữa khung hình…");
         const scan=async()=>{if(stopped||!videoRef.current)return;try{const found=await detector.detect(videoRef.current);const value=found.find((item)=>item.rawValue)?.rawValue;if(value){stop();onDetected(value);return;}}catch{ /* next frame can retry */ }frameRef.current=requestAnimationFrame(()=>void scan());};void scan();
       } catch(cause) { const message=cause instanceof Error?cause.message:"Không thể mở camera";setStatus(message);onError(message); }
