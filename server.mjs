@@ -589,9 +589,11 @@ app.get("/api/store", async (req, res, next) => {
   try {
     const state=await store.read(),actor=actorFrom(req,state);
     if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập",setupRequired:state.accounts.length===0});
-    const uploaded=stockIndex(state.stockRecords),picking=state.picking.filter((item)=>item.userId===actor.userId).map((item)=>{const product=state.products.find((p)=>p.id===item.productId);return product?{...withUploadedStock(product,uploaded),pickId:asText(item.id,item.productId),quantity:item.quantity,picked:item.picked,customerName:asText(item.customerName),note:asText(item.note),assignedBy:asText(item.assignedBy)}:null;}).filter(Boolean);
+    const uploaded=stockIndex(state.stockRecords),accountsById=new Map(state.accounts.map((account)=>[account.id,account]));
+    const pickItem=(item)=>{const product=state.products.find((p)=>p.id===item.productId),assignee=accountsById.get(item.userId);return product?{...withUploadedStock(product,uploaded),pickId:asText(item.id,item.productId),quantity:item.quantity,picked:item.picked,customerName:asText(item.customerName),note:asText(item.note),assignedBy:asText(item.assignedBy),assigneeId:item.userId,assigneeName:asText(assignee?.name,"Nhân viên đã xóa")}:null;};
+    const picking=state.picking.filter((item)=>item.userId===actor.userId).map(pickItem).filter(Boolean),assignedPicking=canManage(actor.role)?state.picking.map(pickItem).filter(Boolean):[];
     const users=(canManage(actor.role)?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount),summary=getProductSummary(state),manual=manualCheckGroups(state);
-    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,manualChecks:manual,stockImport:state.stockImport};
+    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,assignedPicking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,manualChecks:manual,stockImport:state.stockImport};
     res.status(data.status||200).json(data);
   } catch (error) { next(error); }
 });
