@@ -28,11 +28,25 @@ const aisleNames: Record<string,string> = {
   "16":"Nonfood","17":"Beer & Liquor","18":"Tea & Drinks","19":"Coffee","20":"Topvalu","21":"Topvalu","22":"Asia",
   "23":"Asia","24":"Noodles","25":"Rice","26":"Sauces","27":"Spices","28":"Seafood"
 };
-const menu: Array<{id:Tab;label:string;icon:string}> = [
-  {id:"DASHBOARD",label:"Tổng quan",icon:"◫"},{id:"MAP",label:"Sơ đồ POG",icon:"▦"},{id:"PRODUCTS",label:"Sản phẩm",icon:"▤"},
-  {id:"CHECK_STOCK",label:"Check Stock",icon:"▤"},{id:"STOCK",label:"Kiểm tồn",icon:"□"},{id:"LOSS",label:"Thất thoát",icon:"△"},{id:"DATE",label:"Hạn dùng",icon:"◷"},
-  {id:"ORDER",label:"Đơn soạn",icon:"✓"},{id:"SUGGEST",label:"Gợi ý",icon:"✦"}
+const menu: Array<{id:Tab;label:string}> = [
+  {id:"DASHBOARD",label:"Tổng quan"},{id:"MAP",label:"Sơ đồ POG"},{id:"PRODUCTS",label:"Sản phẩm"},
+  {id:"CHECK_STOCK",label:"Check Stock"},{id:"STOCK",label:"Kiểm tồn"},{id:"LOSS",label:"Thất thoát"},{id:"DATE",label:"Hạn dùng"},
+  {id:"ORDER",label:"Đơn soạn"},{id:"SUGGEST",label:"Gợi ý"}
 ];
+function AppIcon({name}:{name:Tab}) {
+  const paths:Record<Tab,React.ReactNode>={
+    DASHBOARD:<><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></>,
+    MAP:<><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3Z"/><path d="M9 3v15M15 6v15"/></>,
+    PRODUCTS:<><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></>,
+    CHECK_STOCK:<><path d="M5 3h14v18H5z"/><path d="M8 7h8M8 11h5M8 15h3"/><path d="m14 16 1.5 1.5L19 14"/></>,
+    STOCK:<><path d="M4 5h16v14H4z"/><path d="M4 9h16M9 9v10"/><path d="M13 14h4"/></>,
+    LOSS:<><path d="M12 3 2.8 20h18.4Z"/><path d="M12 9v5M12 17h.01"/></>,
+    DATE:<><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15 2 2 4-4"/></>,
+    ORDER:<><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h3"/><path d="m15 16 1.5 1.5L20 13"/></>,
+    SUGGEST:<><path d="M9 18h6M10 22h4"/><path d="M8.2 15.2A7 7 0 1 1 15.8 15.2c-1.1.8-1.8 1.6-1.8 2.8h-4c0-1.2-.7-2-1.8-2.8Z"/><path d="M12 2V0M4 5 2.5 3.5M20 5l1.5-1.5"/></>
+  };
+  return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
 const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"",barcode:"",line:"01",lineName:"SOUVENIR",side:"A",bay:1,price:0,stock:0,loss:0,expDate:"" };
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
@@ -311,7 +325,7 @@ export default function Home() {
       </header>
 
       <div className="ops-body">
-        <nav className="side-nav">{menu.map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span>{item.icon}</span>{item.label}{item.id==="ORDER"&&data.picking.length>0?<b>{data.picking.length}</b>:null}</button>)}</nav>
+        <nav className="side-nav">{menu.map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span><AppIcon name={item.id}/></span>{item.label}{item.id==="ORDER"&&data.picking.length>0?<b>{data.picking.length}</b>:null}</button>)}</nav>
         <section className="ops-content">
           {(["PRODUCTS","CHECK_STOCK"] as Tab[]).includes(tab)&&<OpsFilters lines={availableLines} line={lineFilter} stock={stockFilter} visible={products.length} total={productResult.total} onLine={(value)=>{setLineFilter(value);setProductPage(1);}} onStock={(value)=>{setStockFilter(value);setProductPage(1);}} onClear={()=>{setQuery("");setLineFilter("all");setStockFilter("all");setProductPage(1);}}/>}
           {tab==="DASHBOARD"&&<Dashboard products={data.alertProducts} totalProducts={data.productTotal} logs={data.logs} totals={data.productStats} onGo={(next)=>{setTab(next);setProductPage(1);}}/>}
@@ -327,7 +341,7 @@ export default function Home() {
         </section>
       </div>
 
-      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","CHECK_STOCK","STOCK","LOSS","DATE","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span>{item.icon}</span>{item.label}</button>)}</nav>
+      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","CHECK_STOCK","STOCK","LOSS","DATE","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span><AppIcon name={item.id}/></span>{item.label}</button>)}</nav>
       <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importExcel(e.target.files?.[0])}/>
       <input ref={stockExcelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importStockExcel(e.target.files?.[0])}/>
 
@@ -421,7 +435,7 @@ function OrderView({items,assignedItems,onToggle,onAvailability,onQuantity,onRem
   const pickedUnits=items.filter((p)=>Boolean(p.picked)).reduce((sum,p)=>sum+p.quantity,0),totalUnits=items.reduce((sum,p)=>sum+p.quantity,0),percent=totalUnits?Math.round(pickedUnits/totalUnits*100):0,next=sorted.find((p)=>!p.picked);
   const finish=()=>{if(next&&!window.confirm("Đơn vẫn còn sản phẩm chưa lấy. Bạn có chắc muốn hoàn tất và xóa đơn?"))return;onClear()};
   return <div><PageHead eyebrow="PICKING LIST" title="Đơn đang soạn" subtitle={pickedUnits+"/"+totalUnits+" sản phẩm đã lấy · sắp theo lộ trình Line"} actions={items.length?<button className="primary" onClick={finish}>{next?"Kết thúc sớm":"Hoàn tất đơn"}</button>:undefined}/>{next&&<section className="next-pick"><div><small>ĐIỂM LẤY TIẾP THEO</small><b>Line {next.line}{next.side} · Kệ {next.bay}</b><span>{next.name} · SL {next.quantity}</span></div><button onClick={()=>onMap(next)}>Mở vị trí →</button></section>}<div className="order-progress-large"><i><span style={{width:percent+"%"}}/></i><b>{percent}%</b></div>
-    <div className="order-list">{sorted.map((p)=><article key={p.pickId} className={p.picked?"picked":""}><div className="pick-product-thumb">{p.imageUrl?<img src={p.imageUrl} alt=""/>:<span>{p.name.slice(0,2).toUpperCase()}</span>}</div><button className={"availability-toggle "+(p.available!==false?"available":"unavailable")} aria-label={p.available!==false?"Đánh dấu hết hàng":"Đánh dấu còn hàng"} onClick={()=>onAvailability(p)}><i/><span>{p.available!==false?"Còn hàng":"Hết hàng"}</span></button><button className="pick-check" aria-label={p.picked?"Đánh dấu chưa lấy":"Đánh dấu đã lấy"} onClick={()=>onToggle(p)}>{p.picked?"✓":""}</button><div><small>SKU {p.sku}{p.customerName?" · Khách: "+p.customerName:""}</small><b>{p.name}</b><span>{p.barcode||p.supplierBarcode?"Barcode: "+(p.barcode||p.supplierBarcode)+" · ":""}Line {p.line}{p.side} · Kệ {p.bay}{p.note?" · "+p.note:""}</span></div><div className="pick-quantity"><button disabled={p.quantity<=1} onClick={()=>onQuantity(p,p.quantity-1)}>−</button><b>{p.quantity}</b><button onClick={()=>onQuantity(p,p.quantity+1)}>+</button></div><StockBadge stock={p.stock}/><button onClick={()=>onMap(p)}>Vị trí</button><button className="danger-text" onClick={()=>onRemove(p)}>Bỏ</button></article>)}{!items.length&&<div className="empty big"><b>Đơn soạn đang trống</b><span>Chờ đơn được giao từ Check Stock hoặc thêm sản phẩm từ tìm kiếm.</span></div>}</div><AssignedOrdersView items={assignedItems}/></div>;
+    <div className="order-list">{sorted.map((p)=><article key={p.pickId} className={p.picked?"picked":""}><div className="pick-product-thumb">{p.imageUrl?<img src={p.imageUrl} alt=""/>:<span>{p.name.slice(0,2).toUpperCase()}</span>}</div><button className={"availability-toggle "+(p.available!==false?"available":"unavailable")} aria-pressed={p.available===false} aria-label={p.available!==false?"Chuyển sản phẩm sang hết hàng":"Chuyển sản phẩm sang còn hàng"} title={p.available!==false?"Nhấn để báo hết hàng":"Nhấn để báo còn hàng"} onClick={()=>onAvailability(p)}><i/><span><b>{p.available!==false?"Còn hàng":"Hết hàng"}</b><small>{p.available!==false?"Nhấn để báo hết":"Nhấn để hoàn tác"}</small></span></button><button className="pick-check" aria-label={p.picked?"Đánh dấu chưa lấy":"Đánh dấu đã lấy"} onClick={()=>onToggle(p)}>{p.picked?"✓":""}</button><div><small>SKU {p.sku}{p.customerName?" · Khách: "+p.customerName:""}</small><b>{p.name}</b><span>{p.barcode||p.supplierBarcode?"Barcode: "+(p.barcode||p.supplierBarcode)+" · ":""}Line {p.line}{p.side} · Kệ {p.bay}{p.note?" · "+p.note:""}</span></div><div className="pick-quantity"><button disabled={p.quantity<=1} onClick={()=>onQuantity(p,p.quantity-1)}>−</button><b>{p.quantity}</b><button onClick={()=>onQuantity(p,p.quantity+1)}>+</button></div><StockBadge stock={p.stock}/><button onClick={()=>onMap(p)}>Vị trí</button><button className="danger-text" onClick={()=>onRemove(p)}>Bỏ</button></article>)}{!items.length&&<div className="empty big"><b>Đơn soạn đang trống</b><span>Chờ đơn được giao từ Check Stock hoặc thêm sản phẩm từ tìm kiếm.</span></div>}</div><AssignedOrdersView items={assignedItems}/></div>;
 }
 function AssignedOrdersView({items}:{items:AssignedPickItem[]}) {
   const grouped=new Map<string,AssignedPickItem[]>();for(const item of items){const raw=(item.customerName||"Chưa đặt tên khách").trim().replace(/\s+/g," ");const key=normalize(raw)||"chua dat ten khach";grouped.set(key,[...(grouped.get(key)||[]),{...item,customerName:raw}]);}
