@@ -798,8 +798,10 @@ app.post("/api/ai/suggest", async (req, res, next) => {
       const retryAfter=takeAiQuota(actor.userId);
       if(retryAfter){res.set("Retry-After",String(retryAfter));return res.status(429).json({error:"Bạn đang phân tích quá nhanh. Vui lòng thử lại sau "+retryAfter+" giây."});}
     }
-    const suggestions=await openAiProductSuggestions(query,state.products.map((product)=>withUploadedStock(product,stockIndex(state.stockRecords))).filter((product)=>product.stockKnown));
-    const result={...suggestions,productCount:state.stockRecords.length};
+    const productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
+    const stockProducts=state.stockRecords.map((record)=>{const product=productsBySku.get(normalizeText(record.sku));return product?{...product,stock:record.stock,stockKnown:true,loss:0,expDate:"",sales:record.sales||0}:null;}).filter((product)=>product&&product.stock>0).sort((a,b)=>b.stock-a.stock).slice(0,5000);
+    const suggestions=await openAiProductSuggestions(query,stockProducts);
+    const result={...suggestions,productCount:stockProducts.length};
     suggestionCache.set(cacheKey,{result,expiresAt:Date.now()+60_000});if(suggestionCache.size>100){const oldest=suggestionCache.keys().next().value;if(oldest)suggestionCache.delete(oldest);}
     res.set("Cache-Control","no-store").json(result);
   } catch (error) { next(error); }
