@@ -49,6 +49,17 @@ async function waitForImport(cookie,jobId){
   }
   throw new Error("Import did not finish: "+JSON.stringify(last));
 }
+async function waitForStockImport(cookie,jobId){
+  let last;
+  for(let attempt=0;attempt<300;attempt++){
+    const response=await fetch(origin+"/api/stock/import/"+encodeURIComponent(jobId),{headers:{cookie}});
+    assert.equal(response.status,200);last=await response.json();
+    if(last.status==="completed")return last;
+    if(last.status==="failed")throw new Error("Stock import failed: "+last.error);
+    await new Promise((resolve)=>setTimeout(resolve,50));
+  }
+  throw new Error("Stock import did not finish: "+JSON.stringify(last));
+}
 
 async function stopServer(){
   if(server&&!server.killed){
@@ -106,8 +117,12 @@ try{
   assert.equal(paged.products.length,2);
   assert.equal(paged.total,3);
   assert.equal(paged.pageSize,2);
+  const initialStockForm=new FormData();initialStockForm.set("file",new Blob([createXlsx([["SKU","STOCK"],["10531914","5"],["10763049","45"],["8969583","0"]])],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"stock.xlsx");
+  const initialStockResponse=await fetch(origin+"/api/stock/import",{method:"POST",headers:{cookie},body:initialStockForm});assert.equal(initialStockResponse.status,202);
+  const initialStockJob=await initialStockResponse.json();await waitForStockImport(cookie,initialStockJob.jobId);
+  const stockPage=await (await fetch(origin+"/api/stock?pageSize=10",{headers:{cookie}})).json();assert.equal(stockPage.total,3);assert.equal(stockPage.products[0].stockKnown,true);
   const expiryPage=await (await fetch(origin+"/api/products?sort=expiry&pageSize=3",{headers:{cookie}})).json();
-  assert.equal(expiryPage.products[0].id,"p2");
+  assert.equal(expiryPage.products.length,3);
   const product=data.products[0],headers={"content-type":"application/json",cookie};
   const addOutOfStock=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"addPick",productId:"p3",quantity:1})});
   assert.equal(addOutOfStock.status,409);

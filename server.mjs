@@ -42,7 +42,7 @@ function initialState() {
       { id:"p2",sku:"10763049",barcode:"45497410763049",supplierBarcode:"45497410763049",name:"HC GỐI MOCHI PILLOW BE",division:"12",divisionName:"HOME & LIVING",department:"1201",departmentName:"HOME COORDY",line:"12",lineName:"HOUSEHOLD",side:"B",bay:2,price:185000,stock:45,loss:2,expDate:"2026-06-15",updatedAt:now },
       { id:"p3",sku:"8969583",barcode:"8801260418800",supplierBarcode:"8801260418800",name:"BVS SOONSOOHANMYEON 23CM 18 MIẾNG",division:"10",divisionName:"HEALTH & BEAUTY",department:"1002",departmentName:"FEMININE CARE",line:"16",lineName:"NONFOOD",side:"A",bay:5,price:45000,stock:0,loss:0,expDate:"2027-01-10",updatedAt:now },
     ],
-    accounts: [], sessions: [], roles: [], logs: [], picking: [], pogFiles: [],
+    accounts: [], sessions: [], roles: [], logs: [], picking: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
     lineConfigs: lineDefaults.map(([line,name,color,logo]) => ({ line,name,color,logo,updatedAt:now })),
   };
 }
@@ -53,7 +53,7 @@ async function writeLocalState(state) {
     const entries=Object.entries(state);await handle.write("{");
     for(let entryIndex=0;entryIndex<entries.length;entryIndex++){
       const [key,value]=entries[entryIndex];if(entryIndex)await handle.write(",");await handle.write(JSON.stringify(key)+":");
-      if(key==="products"&&Array.isArray(value)){
+      if((key==="products"||key==="stockRecords")&&Array.isArray(value)){
         await handle.write("[");
         for(let index=0;index<value.length;index+=1000){const batch=value.slice(index,index+1000).map((item)=>JSON.stringify(item)).join(",");await handle.write((index?",":"")+batch);}
         await handle.write("]");
@@ -81,6 +81,9 @@ function ensureStateShape(source) {
   state.logs=Array.isArray(state.logs)?state.logs:[];
   state.picking=Array.isArray(state.picking)?state.picking:[];
   state.pogFiles=Array.isArray(state.pogFiles)?state.pogFiles:[];
+  state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
+  state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
+  state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
   state.lineConfigs=Array.isArray(state.lineConfigs)&&state.lineConfigs.length?state.lineConfigs:lineDefaults.map(([line,name,color,logo])=>({line,name,color,logo,updatedAt:Date.now()}));
   return state;
 }
@@ -133,19 +136,38 @@ function availableProducts(products) {
   return products.filter((product) => product.stock > 0 && (!product.expDate || product.expDate >= today));
 }
 
-function productSummary(products) {
+function stockIndex(records) {
+  return new Map(records.map((record)=>[normalizeText(record.sku),record]));
+}
+function withUploadedStock(product,index) {
+  const record=index.get(normalizeText(product.sku));
+  return {...product,stock:record?.stock||0,stockKnown:Boolean(record),loss:0,expDate:""};
+}
+function manualCheckGroups(state) {
+  const productsById=new Map(state.products.map((product)=>[product.id,product]));
+  const groups={stock:[],loss:[],expiry:[]};
+  for(const check of state.manualChecks){
+    const product=productsById.get(check.productId);if(!product)continue;
+    if(check.stock!==undefined)groups.stock.push({...product,stock:check.stock,stockKnown:true,updatedAt:check.updatedAt});
+    if(check.loss!==undefined)groups.loss.push({...product,loss:check.loss,updatedAt:check.updatedAt});
+    if(check.expDate)groups.expiry.push({...product,expDate:check.expDate,updatedAt:check.updatedAt});
+  }
+  return groups;
+}
+function productSummary(products,stockRecords=[],manualChecks=[]) {
   const today=new Date();today.setHours(0,0,0,0);const soon=today.getTime()+30*86400000;
   const stats={total:0,outCount:0,lowCount:0,totalLoss:0,expiring:0},alerts=[],lines=new Set();
-  for(const product of products){
-    stats.total++;if(product.stock===0)stats.outCount++;if(product.stock>0&&product.stock<10)stats.lowCount++;stats.totalLoss+=Number(product.loss)||0;lines.add(product.line);
-    const expiry=product.expDate?new Date(product.expDate+"T00:00:00").getTime():Infinity;
+  const uploaded=stockIndex(stockRecords),manualById=new Map(manualChecks.map((item)=>[item.productId,item]));
+  for(const source of products){
+    const product=withUploadedStock(source,uploaded),manual=manualById.get(product.id),loss=Number(manual?.loss)||0,expiryText=asText(manual?.expDate),expiry=expiryText?new Date(expiryText+"T00:00:00").getTime():Infinity;
+    stats.total++;if(product.stockKnown&&product.stock===0)stats.outCount++;if(product.stockKnown&&product.stock>0&&product.stock<10)stats.lowCount++;stats.totalLoss+=loss;lines.add(product.line);
     if(expiry<=soon)stats.expiring++;
-    if(alerts.length<6&&(product.stock<10||product.loss>0||expiry<=soon))alerts.push(product);
+    if(alerts.length<6&&((product.stockKnown&&product.stock<10)||loss>0||expiry<=soon))alerts.push({...product,loss,expDate:expiryText});
   }
   return {stats,alerts,lines:[...lines].sort((a,b)=>Number(a)-Number(b))};
 }
-const productSummaryCache=new WeakMap(),productSearchCache=new WeakMap();
-function getProductSummary(products){let summary=productSummaryCache.get(products);if(!summary){summary=productSummary(products);productSummaryCache.set(products,summary);}return summary;}
+const productSearchCache=new WeakMap();
+function getProductSummary(state){return productSummary(state.products,state.stockRecords,state.manualChecks);}
 function productSearchText(product){let value=productSearchCache.get(product);if(!value){value=normalizeText([product.name,product.sku,product.barcode,product.supplierBarcode,product.division,product.divisionName,product.department,product.departmentName,product.line,product.lineName,product.side].join(" "));productSearchCache.set(product,value);}return value;}
 function expiryRank(product){if(!product.expDate)return 0;const value=Date.parse(product.expDate+"T00:00:00");return Number.isFinite(value)?value:Number.MAX_SAFE_INTEGER;}
 function pushExpiryTop(heap,product,limit){
@@ -380,6 +402,7 @@ function requireImportCapacity(req,res,next) {
 
 const masterJobs=new Map(),masterJobQueue=[];
 let masterJobRunning=false;
+const stockJobs=new Map();
 
 function publicMasterJob(job) {
   return {
@@ -416,6 +439,32 @@ function runMasterWorker(job,resultPath) {
     worker.on("error",(error)=>void fail(error));
     worker.on("exit",(code)=>{if(!settled)void fail(new Error("Tiến trình đọc Excel đã dừng mà chưa tạo kết quả (mã "+code+")"));});
   });
+}
+
+function runStockWorker(job,resultPath) {
+  return new Promise((resolve,reject)=>{
+    const worker=new Worker(new URL("./workers/stock-import-worker.mjs",import.meta.url),{workerData:{filePath:job.filePath,resultPath,maxRows:masterImportMaxRows},resourceLimits:{maxOldGenerationSizeMb:1024}});
+    let settled=false;
+    const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timeout);if(error)reject(error);else resolve(value);};
+    const timeout=setTimeout(()=>{void worker.terminate();finish(new Error("Xử lý file Stock vượt quá 30 phút và đã được dừng"));},30*60_000);
+    worker.on("message",(message)=>{if(message?.type==="progress")updateMasterJob(job,{status:"processing",phase:message.phase,percent:Math.max(job.percent||0,Number(message.percent)||0),processedRows:Number(message.processedRows)||0,totalRows:Number(message.totalRows)||0});if(message?.type==="done")finish(null,message.resultPath);if(message?.type==="error")finish(new Error(asText(message.error,"Không thể xử lý file Stock")));});
+    worker.on("error",(error)=>finish(error));worker.on("exit",(code)=>{if(!settled&&code!==0)finish(new Error("Tiến trình đọc Stock đã dừng (mã "+code+")"));});
+  });
+}
+async function runStockJob(job) {
+  const resultPath=path.join(importDir,job.id+".stock.result.json");
+  try {
+    updateMasterJob(job,{status:"processing",phase:"Đang khởi động bộ xử lý tồn kho",percent:8});await runStockWorker(job,resultPath);
+    const result=await store.mutate(async(state)=>{
+      const account=state.accounts.find((item)=>item.id===job.ownerId&&item.active!==false);if(!account||!canManage(account.role))throw new Error("Tài khoản không còn quyền cập nhật Stock");
+      const reader=createInterface({input:createReadStream(resultPath,{encoding:"utf8"}),crlfDelay:Infinity});let metadata=null,records=[],processed=0;
+      for await(const line of reader){if(!line)continue;if(!metadata){metadata=JSON.parse(line);continue;}records.push({...JSON.parse(line),updatedAt:Date.now()});processed++;if(processed%5000===0){updateMasterJob(job,{phase:"Đang lưu danh sách tồn kho",percent:82,processedRows:processed,totalRows:job.totalRows||processed});await yieldToServer();}}
+      if(!metadata)throw new Error("Không tìm thấy kết quả file Stock");state.stockRecords=records;state.stockImport={fileName:job.fileName,updatedAt:Date.now(),recordCount:records.length,skipped:metadata.skipped};audit(state,publicAccount(account),"Nhập file Stock: "+records.length+" SKU");
+      return {fileName:job.fileName,imported:records.length,headerRow:metadata.headerRow,skipped:metadata.skipped,duplicates:metadata.duplicates,issues:metadata.issues};
+    });
+    updateMasterJob(job,{status:"completed",phase:"Hoàn tất",percent:100,processedRows:result.imported,totalRows:result.imported,result});
+  } catch(error) { updateMasterJob(job,{status:"failed",phase:"Nhập Stock thất bại",error:error instanceof Error?error.message:"Không thể đọc file Stock"}); }
+  finally { await Promise.allSettled([fs.unlink(job.filePath),fs.unlink(resultPath),fs.unlink(resultPath+".part")]); }
 }
 
 const masterFields=["sku","name","division","divisionName","department","departmentName","supplierBarcode","line","lineName"];
@@ -535,9 +584,9 @@ app.get("/api/store", async (req, res, next) => {
   try {
     const state=await store.read(),actor=actorFrom(req,state);
     if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập",setupRequired:state.accounts.length===0});
-    const picking=state.picking.filter((item)=>item.userId===actor.userId).map((item)=>{const product=state.products.find((p)=>p.id===item.productId);return product?{...product,quantity:item.quantity,picked:item.picked}:null;}).filter(Boolean);
-    const users=(actor.role==="ADMIN"?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount),summary=getProductSummary(state.products);
-    const data={actor,products:req.query.includeProducts==="1"?state.products:[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs};
+    const uploaded=stockIndex(state.stockRecords),picking=state.picking.filter((item)=>item.userId===actor.userId).map((item)=>{const product=state.products.find((p)=>p.id===item.productId);return product?{...withUploadedStock(product,uploaded),quantity:item.quantity,picked:item.picked}:null;}).filter(Boolean);
+    const users=(actor.role==="ADMIN"?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount),summary=getProductSummary(state),manual=manualCheckGroups(state);
+    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,manualChecks:manual,stockImport:state.stockImport};
     res.status(data.status||200).json(data);
   } catch (error) { next(error); }
 });
@@ -546,19 +595,21 @@ app.get("/api/products", async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const id=asText(req.query.id);
-    if(id){const product=state.products.find((item)=>item.id===id);return product?res.json({products:[product],total:1,page:1,pageSize:1}):res.status(404).json({error:"Không tìm thấy sản phẩm"});}
+    const uploaded=stockIndex(state.stockRecords);
+    if(id){const product=state.products.find((item)=>item.id===id);return product?res.json({products:[withUploadedStock(product,uploaded)],total:1,page:1,pageSize:1}):res.status(404).json({error:"Không tìm thấy sản phẩm"});}
     const query=normalizeText(asText(req.query.q).slice(0,200)),line=asText(req.query.line),side=asText(req.query.side),stock=asText(req.query.stock,"all"),sort=asText(req.query.sort),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize;
-    if(!query&&(!line||line==="all")&&!side&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize),total:state.products.length,page,pageSize,matchedLines:[]});
+    if(!query&&(!line||line==="all")&&!side&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total:state.products.length,page,pageSize,matchedLines:[]});
     const passesFilters=(product)=>{
       if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;
-      if(stock==="available"&&product.stock<=0)return false;if(stock==="low"&&!(product.stock>0&&product.stock<10))return false;if(stock==="out"&&product.stock!==0)return false;
+      const current=uploaded.get(normalizeText(product.sku));
+      if(stock==="available"&&!(current?.stock>0))return false;if(stock==="low"&&!(current?.stock>0&&current.stock<10))return false;if(stock==="out"&&current?.stock!==0)return false;
       return !query||productSearchText(product).includes(query);
     };
     if(sort==="expiry"){
       let total=0,scanned=0;const heap=[],matchedLines=new Set(),limit=start+pageSize;
       for(const product of state.products){if(++scanned%5000===0){await yieldToServer();if(req.destroyed)return;}if(!passesFilters(product))continue;total++;matchedLines.add(product.line);pushExpiryTop(heap,product,limit);}
       const ordered=heap.sort((a,b)=>a.rank-b.rank||String(a.product.sku).localeCompare(String(b.product.sku))).map((entry)=>entry.product);
-      return res.set("Cache-Control","no-store").json({products:ordered.slice(start,start+pageSize),total,page,pageSize,matchedLines:[...matchedLines]});
+      return res.set("Cache-Control","no-store").json({products:ordered.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total,page,pageSize,matchedLines:[...matchedLines]});
     }
     let total=0,ordinarySeen=0,scanned=0;const matches=[],exact=[],matchedLines=new Set();
     for(const product of state.products){
@@ -578,7 +629,16 @@ app.get("/api/products", async(req,res,next)=>{
         if(orderedIndex>=start&&matches.length<pageSize)matches.push(product);orderedIndex++;if(matches.length>=pageSize)break;
       }}
     }
-    res.set("Cache-Control","no-store").json({products:matches,total,page,pageSize,matchedLines:[...matchedLines]});
+    res.set("Cache-Control","no-store").json({products:matches.map((product)=>withUploadedStock(product,uploaded)),total,page,pageSize,matchedLines:[...matchedLines]});
+  } catch(error){next(error);}
+});
+
+app.get("/api/stock", async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const query=normalizeText(asText(req.query.q).slice(0,200)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize,bySku=stockIndex(state.stockRecords),productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
+    const rows=[];for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku)),row={...(product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),stock:record.stock,stockKnown:true,updatedAt:record.updatedAt};if(!query||productSearchText(row).includes(query))rows.push(row);}
+    rows.sort((a,b)=>a.sku.localeCompare(b.sku));res.set("Cache-Control","no-store").json({products:rows.slice(start,start+pageSize),total:rows.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!productsBySku.has(normalizeText(row.sku))).length});
   } catch(error){next(error);}
 });
 
@@ -643,23 +703,22 @@ app.post("/api/store", async (req, res, next) => {
         const index=idIndex,existing=index>=0?state.products[index]:null,line=cleanLine(source.line);
         if(!defaultLineNames.has(line))return fail("Line phải từ 01 đến 28");
         const supplierBarcode=asText(source.supplierBarcode)||asText(source.barcode);
-        const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:supplierBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price)),stock:Math.max(0,asInt(source.stock)),loss:Math.max(0,asInt(source.loss)),expDate:asText(source.expDate),updatedAt:Date.now()};
+        const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:supplierBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price)),stock:0,loss:0,expDate:"",updatedAt:Date.now()};
         if(index>=0) state.products[index]=product; else state.products.unshift(product);
-        productSummaryCache.delete(state.products);audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
+        audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
       }
       if (action === "deleteProduct") {
         if (!canManage(actor.role)) return fail("Cần quyền Manager hoặc Admin",403);
         const index=state.products.findIndex((p)=>p.id===asText(body.id));
-        if(index>=0){const [item]=state.products.splice(index,1);state.picking=state.picking.filter((p)=>p.productId!==item.id);productSummaryCache.delete(state.products);audit(state,actor,"Xóa sản phẩm SKU "+item.sku);} return {ok:true};
+        if(index>=0){const [item]=state.products.splice(index,1);state.picking=state.picking.filter((p)=>p.productId!==item.id);state.manualChecks=state.manualChecks.filter((check)=>check.productId!==item.id);audit(state,actor,"Xóa sản phẩm SKU "+item.sku);} return {ok:true};
       }
-      if (action === "adjustStock" || action === "adjustLoss" || action === "updateDate") {
-        const product=state.products.find((p)=>p.id===asText(body.id)); if(!product)return fail("Không tìm thấy sản phẩm",404);
-        if(action==="adjustStock"){product.stock=Math.max(0,product.stock+asInt(body.delta));audit(state,actor,"Cập nhật tồn SKU "+product.sku);}
-        if(action==="adjustLoss"){product.loss=Math.max(0,product.loss+asInt(body.delta));audit(state,actor,"Cập nhật loss SKU "+product.sku);}
-        if(action==="updateDate"){product.expDate=asText(body.expDate);audit(state,actor,"Cập nhật HSD SKU "+product.sku);}
-        product.updatedAt=Date.now();productSummaryCache.delete(state.products);return {ok:true};
+      if (action === "setManualCheck") {
+        const kind=asText(body.kind),sku=asText(body.sku),product=state.products.find((p)=>normalizeText(p.sku)===normalizeText(sku));if(!product)return fail("SKU không có trong Master Data",404);
+        const value=body.value,now=Date.now(),index=state.manualChecks.findIndex((item)=>item.productId===product.id),current=index>=0?state.manualChecks[index]:{productId:product.id};
+        if(kind==="stock")current.stock=Math.max(0,asInt(value));else if(kind==="loss")current.loss=Math.max(0,asInt(value));else if(kind==="expiry"){const date=asText(value);if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return fail("Hạn dùng cần theo định dạng ngày hợp lệ");current.expDate=date;}else return fail("Loại kiểm tra không hợp lệ");
+        current.updatedAt=now;if(index>=0)state.manualChecks[index]=current;else state.manualChecks.push(current);audit(state,actor,"Nhập thủ công "+(kind==="stock"?"kiểm tồn":kind==="loss"?"thất thoát":"hạn dùng")+" SKU "+product.sku);return {ok:true};
       }
-      if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1))),product=state.products.find((p)=>p.id===productId);if(!product)return fail("Không tìm thấy sản phẩm",404);if(product.stock<=0)return fail("Sản phẩm đang hết hàng",409);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;}else state.picking.push({userId:actor.userId,productId,quantity,picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
+      if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1))),product=state.products.find((p)=>p.id===productId),record=product&&stockIndex(state.stockRecords).get(normalizeText(product.sku));if(!product)return fail("Không tìm thấy sản phẩm",404);if(!record)return fail("Chưa có dữ liệu tồn kho từ file Stock cho sản phẩm này",409);if(record.stock<=0)return fail("Sản phẩm đang hết hàng",409);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;}else state.picking.push({userId:actor.userId,productId,quantity,picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
       if(action==="updatePickQuantity"){const item=state.picking.find((p)=>p.userId===actor.userId&&p.productId===asText(body.productId));if(!item)return fail("Sản phẩm không còn trong đơn",404);item.quantity=Math.max(1,Math.min(99,asInt(body.quantity,1)));item.picked=false;audit(state,actor,"Cập nhật số lượng cần lấy");return {ok:true};}
       if(action==="togglePick"){const item=state.picking.find((p)=>p.userId===actor.userId&&p.productId===asText(body.productId));if(item)item.picked=!item.picked;audit(state,actor,"Cập nhật trạng thái lấy hàng");return {ok:true};}
       if(action==="removePick"){state.picking=state.picking.filter((p)=>!(p.userId===actor.userId&&p.productId===asText(body.productId)));audit(state,actor,"Bỏ sản phẩm khỏi đơn soạn");return {ok:true};}
@@ -697,6 +756,21 @@ app.get("/api/master-data/import/:jobId",async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
+app.post("/api/stock/import", requireManager, masterUpload.single("file"), async(req,res,next)=>{
+  try {
+    if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel .xlsx"});
+    const removeUpload=()=>fs.unlink(req.file.path).catch(()=>undefined);
+    if(!req.file.originalname.toLowerCase().endsWith(".xlsx")){await removeUpload();return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});}
+    const handle=await fs.open(req.file.path,"r");let signature;try{signature=Buffer.alloc(4);await handle.read(signature,0,4,0);}finally{await handle.close();}
+    if(req.file.size<4||signature[0]!==0x50||signature[1]!==0x4b){await removeUpload();return res.status(400).json({error:"File .xlsx không hợp lệ hoặc đã bị hỏng"});}
+    const active=[...stockJobs.values()].find((job)=>["queued","processing"].includes(job.status));if(active){await removeUpload();return res.status(409).json({error:"Hệ thống đang xử lý một file Stock khác"});}
+    const now=Date.now(),job={id:randomUUID(),ownerId:req.fulfillmentActor.userId,fileName:req.file.originalname,filePath:req.file.path,status:"queued",phase:"Đã nhận file Stock",percent:5,processedRows:0,totalRows:0,createdAt:now,updatedAt:now,result:null,error:""};stockJobs.set(job.id,job);res.status(202).set("Location","/api/stock/import/"+job.id).json(publicMasterJob(job));void runStockJob(job);
+  }catch(error){next(error);}
+});
+app.get("/api/stock/import/:jobId",async(req,res,next)=>{
+  try{const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});const job=stockJobs.get(asText(req.params.jobId));if(!job)return res.status(404).json({error:"Không tìm thấy lần nhập Stock"});if(job.ownerId!==actor.userId&&actor.role!=="ADMIN")return res.status(403).json({error:"Bạn không có quyền xem lần nhập này"});res.set("Cache-Control","no-store").json(publicMasterJob(job));}catch(error){next(error);}
+});
+
 app.post("/api/ai/suggest", async (req, res, next) => {
   try {
     const state=await store.read(),actor=actorFrom(req,state);
@@ -707,8 +781,8 @@ app.post("/api/ai/suggest", async (req, res, next) => {
       const retryAfter=takeAiQuota(actor.userId);
       if(retryAfter){res.set("Retry-After",String(retryAfter));return res.status(429).json({error:"Bạn đang phân tích quá nhanh. Vui lòng thử lại sau "+retryAfter+" giây."});}
     }
-    const result=await openAiProductSuggestions(query,state.products);
-    res.set("Cache-Control","no-store").json({...result,productCount:state.products.length});
+    const result=await openAiProductSuggestions(query,state.products.map((product)=>withUploadedStock(product,stockIndex(state.stockRecords))).filter((product)=>product.stockKnown));
+    res.set("Cache-Control","no-store").json({...result,productCount:state.stockRecords.length});
   } catch (error) { next(error); }
 });
 
