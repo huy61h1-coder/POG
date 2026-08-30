@@ -32,7 +32,8 @@ The app creates its `fulfillment_state` table automatically on first start. Set 
 ## Main capabilities
 
 - Product search by name, SKU, barcode, Line, and shelf side
-- Nine-column Product Master Data with safe `.xlsx` updates merged by SKU (up to 500,000 rows / 100 MB)
+- Nine-column Product Master Data with background `.xlsx` updates merged by SKU (up to 500,000 rows / 100 MB), upload/import progress, reconnect recovery, and a bounded import queue
+- Server-side product search, filters, expiry ordering, CSV streaming, and 100-row pagination so the browser never renders the whole catalog at once
 - Product create, edit, delete, and CSV export for Manager/Admin
 - Password login and Admin-managed Staff/Manager/Admin permissions
 - Stock, loss, expiry, and picking workflow
