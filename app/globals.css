@@ -142,4 +142,5 @@
 .side-nav button.active>span,.mobile-nav button.active span{background:var(--brand);color:#fff;border-color:var(--brand);box-shadow:0 5px 12px rgba(182,0,129,.2)}
 .mobile-nav button span{width:29px;height:29px;margin-bottom:3px;font-size:15px}
 .ops-brand img{width:220px;height:58px}
+.app-logo-setting{margin:0 22px 18px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#faf8f9;display:flex;align-items:center;gap:9px;flex-wrap:wrap}.app-logo-setting img{width:220px;height:58px;object-fit:contain;object-position:left center;background:#fff;border-radius:8px}.app-logo-setting label{position:relative;overflow:hidden;cursor:pointer}.app-logo-setting input{position:absolute;inset:0;opacity:0;cursor:pointer}
 @media(max-width:800px){.ops-brand img{width:58px;height:42px}}
