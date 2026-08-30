@@ -144,6 +144,7 @@
 .mobile-nav button span{width:29px;height:29px;margin-bottom:3px;font-size:15px}
 .ops-brand img{width:var(--brand-logo-width,220px);height:58px}
 .app-logo-setting{margin:0 22px 18px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#faf8f9;display:flex;align-items:center;gap:9px;flex-wrap:wrap}.app-logo-setting img{width:220px;height:58px;object-fit:contain;object-position:left center;background:#fff;border-radius:8px}.app-logo-setting label{position:relative;overflow:hidden;cursor:pointer}.app-logo-setting input{position:absolute;inset:0;opacity:0;cursor:pointer}.app-logo-setting small{width:100%;color:var(--muted);font-size:9px;line-height:1.45}
+.pog-upload-inline{margin:0 20px 16px;padding:11px;border:1px dashed var(--line);border-radius:10px;background:#fcfafb;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.pog-upload-inline b{width:100%;color:var(--brand);font-size:10px}.pog-upload-inline select{height:34px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-size:9px}.pog-upload-inline button{min-height:34px;padding:0 10px;font-size:9px}
 .logo-size-control{width:100%;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:10px;font-weight:700}.logo-size-control b{color:var(--brand)}.logo-size-control input{position:static!important;opacity:1!important;flex:1;accent-color:var(--brand)}
 @media(max-width:800px){.ops-brand img{width:58px;height:42px}}
 
