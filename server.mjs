@@ -81,7 +81,7 @@ function ensureStateShape(source) {
   state.logs=Array.isArray(state.logs)?state.logs:[];
   state.picking=Array.isArray(state.picking)?state.picking:[];
   state.pogFiles=Array.isArray(state.pogFiles)?state.pogFiles:[];
-  state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
+  state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
   state.lineConfigs=Array.isArray(state.lineConfigs)&&state.lineConfigs.length?state.lineConfigs:lineDefaults.map(([line,name,color,logo])=>({line,name,color,logo,updatedAt:Date.now()}));
@@ -639,6 +639,17 @@ app.get("/api/stock", async(req,res,next)=>{
     const query=normalizeText(asText(req.query.q).slice(0,200)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize,bySku=stockIndex(state.stockRecords),productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
     const rows=[];for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku)),row={...(product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),stock:record.stock,stockKnown:true,updatedAt:record.updatedAt};if(!query||productSearchText(row).includes(query))rows.push(row);}
     rows.sort((a,b)=>a.sku.localeCompare(b.sku));res.set("Cache-Control","no-store").json({products:rows.slice(start,start+pageSize),total:rows.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!productsBySku.has(normalizeText(row.sku))).length});
+  } catch(error){next(error);}
+});
+
+app.get("/api/stock/export.csv",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"',productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
+    res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=Stock_Fulfillment.csv","Cache-Control":"no-store"});
+    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Department","Department Name","Division","Line","Line Name","Sales","Closing Stock"].map(csvCell).join(",")+"\n");
+    for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku))||{},row=[record.sku,product.name,product.department,product.departmentName,product.division,product.line,product.lineName,record.sales,record.stock].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
+    res.end();
   } catch(error){next(error);}
 });
 
