@@ -56,6 +56,23 @@ const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
 type PogRow = { number:number; sku:string; barcode:string; name:string; y:number; page:number };
+type CropBox = { x:number; y:number; width:number; height:number };
+
+function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,tokens:PdfTextToken[]):CropBox|null {
+  const numeric=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height*.84&&token.fontSize>=5&&/^\d{1,3}[.)]?$/.test(token.text));
+  const notches=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height&&/^notch\b/i.test(token.text));
+  if(numeric.length<2||!notches.length)return null;
+  const anchors=[...numeric,...notches],anchorLeft=Math.min(...anchors.map((token)=>token.x)),anchorRight=Math.max(...anchors.map((token)=>token.x)),anchorTop=Math.min(...anchors.map((token)=>token.y)),anchorBottom=Math.max(...anchors.map((token)=>token.y));
+  const context=canvas.getContext("2d",{willReadFrequently:true});if(!context)return null;
+  const sx=Math.max(0,Math.floor(initial.x)),sy=Math.max(0,Math.floor(initial.y)),sw=Math.min(canvas.width-sx,Math.ceil(initial.width)),sh=Math.min(canvas.height-sy,Math.ceil(initial.height)),pixels=context.getImageData(sx,sy,sw,sh).data;
+  const dark=(x:number,y:number)=>{const index=(y*sw+x)*4;return pixels[index]<125&&pixels[index+1]<125&&pixels[index+2]<125;};
+  const horizontal:number[]=[];for(let y=0;y<sh;y++){let ink=0;for(let x=0;x<sw;x+=2)if(dark(x,y))ink++;if(ink>=sw*.24)horizontal.push(sy+y);}
+  const vertical:number[]=[];for(let x=0;x<sw;x++){let ink=0;for(let y=0;y<sh;y+=2)if(dark(x,y))ink++;if(ink>=sh*.24)vertical.push(sx+x);}
+  const top=[...horizontal].filter((value)=>value<=anchorTop+4).pop(),bottom=horizontal.find((value)=>value>=anchorBottom-4),left=[...vertical].filter((value)=>value<=anchorLeft+4).pop(),right=vertical.find((value)=>value>=anchorRight-4);
+  const fallback={x:Math.max(initial.x,anchorLeft-24),y:Math.max(initial.y,anchorTop-24),width:Math.min(initial.x+initial.width,anchorRight+24)-Math.max(initial.x,anchorLeft-24),height:Math.min(initial.y+initial.height,anchorBottom+24)-Math.max(initial.y,anchorTop-24)};
+  if(top===undefined||bottom===undefined||left===undefined||right===undefined||right-left<initial.width*.35||bottom-top<initial.height*.35)return fallback;
+  return {x:Math.max(initial.x,left-3),y:Math.max(initial.y,top-3),width:Math.min(initial.x+initial.width,right+3)-Math.max(initial.x,left-3),height:Math.min(initial.y+initial.height,bottom+3)-Math.max(initial.y,top-3)};
+}
 
 async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   if(file.type!=="application/pdf"&&!/\.pdf$/i.test(file.name))return null;
@@ -90,10 +107,11 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       {x:0,y:0,width:viewport.width,height:tableTop-14},
       {x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}
     ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25).sort((a,b)=>b.width*b.height-a.width*a.height);
-    const crop=candidates[0];if(!crop)continue;
+    let crop=candidates[0];if(!crop)continue;
     const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
     const context=canvas.getContext("2d");if(!context)continue;
     await page.render({canvas,canvasContext:context,viewport}).promise;
+    const productCrop=cropShelfToProductBorder(canvas,crop,tokens);if(!productCrop)continue;crop=productCrop;
     const markers=new Map<number,{x:number;y:number}>();
     for(const token of tokens){
       const number=Number(token.text.replace(/[.)]/g,""));
