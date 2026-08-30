@@ -43,7 +43,7 @@ function initialState() {
       { id:"p3",sku:"8969583",barcode:"8801260418800",supplierBarcode:"8801260418800",name:"BVS SOONSOOHANMYEON 23CM 18 MIẾNG",division:"10",divisionName:"HEALTH & BEAUTY",department:"1002",departmentName:"FEMININE CARE",line:"16",lineName:"NONFOOD",side:"A",bay:5,price:45000,stock:0,loss:0,expDate:"2027-01-10",updatedAt:now },
     ],
     accounts: [], sessions: [], roles: [], logs: [], picking: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
-    appBrand: { logo:"/aeon-logo.svg", updatedAt:now },
+    appBrand: { logo:"/aeon-logo.svg", logoSize:220, updatedAt:now },
     lineConfigs: lineDefaults.map(([line,name,color,logo]) => ({ line,name,color,logo,updatedAt:now })),
   };
 }
@@ -85,7 +85,7 @@ function ensureStateShape(source) {
   state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
-  state.appBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?{logo:state.appBrand.logo,updatedAt:asInt(state.appBrand.updatedAt,Date.now())}:{logo:"/aeon-logo.svg",updatedAt:Date.now()};
+  state.appBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?{logo:state.appBrand.logo,logoSize:Math.max(120,Math.min(320,asInt(state.appBrand.logoSize,220))),updatedAt:asInt(state.appBrand.updatedAt,Date.now())}:{logo:"/aeon-logo.svg",logoSize:220,updatedAt:Date.now()};
   state.lineConfigs=Array.isArray(state.lineConfigs)&&state.lineConfigs.length?state.lineConfigs:lineDefaults.map(([line,name,color,logo])=>({line,name,color,logo,updatedAt:Date.now()}));
   return state;
 }
@@ -751,7 +751,7 @@ app.post("/api/store", async (req, res, next) => {
       if(action==="removePick"){const key=asText(body.pickId)||asText(body.productId);state.picking=state.picking.filter((p)=>!((p.id===key||p.productId===key)&&p.userId===actor.userId));audit(state,actor,"Bỏ sản phẩm khỏi đơn soạn");return {ok:true};}
       if(action==="clearPick"){state.picking=state.picking.filter((p)=>p.userId!==actor.userId);audit(state,actor,"Hoàn tất và làm trống đơn soạn");return {ok:true};}
       if(action==="updateLineConfig"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const source=body.lineConfig||{},line=cleanLine(source.line),name=asText(source.name).slice(0,48),color=asText(source.color).toUpperCase(),logo=asText(source.logo).slice(0,36);if(!name)return fail("Tên Line là bắt buộc");if(!/^#[0-9A-F]{6}$/.test(color))return fail("Màu cần theo định dạng #RRGGBB");const config={line,name,color,logo,updatedAt:Date.now()},index=state.lineConfigs.findIndex((item)=>item.line===line);if(index>=0)state.lineConfigs[index]=config;else state.lineConfigs.push(config);audit(state,actor,"Cập nhật layout Line "+line+": "+name);return {ok:true};}
-      if(action==="updateAppBrand"){if(actor.role!=="ADMIN")return fail("Chỉ Admin được thay đổi logo ứng dụng",403);const logo=asText(body.logo);if(logo!=="/aeon-logo.svg"&&(!/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(logo)||logo.length>1_500_000))return fail("Logo cần là PNG, JPG, WEBP hoặc SVG, dung lượng tối đa 1 MB");state.appBrand={logo:logo||"/aeon-logo.svg",updatedAt:Date.now()};audit(state,actor,"Cập nhật logo ứng dụng");return {ok:true};}
+      if(action==="updateAppBrand"){if(actor.role!=="ADMIN")return fail("Chỉ Admin được thay đổi logo ứng dụng",403);const logo=asText(body.logo)||state.appBrand?.logo||"/aeon-logo.svg",logoSize=Math.max(120,Math.min(320,asInt(body.logoSize,state.appBrand?.logoSize||220)));if(logo!=="/aeon-logo.svg"&&(!/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(logo)||logo.length>1_500_000))return fail("Logo cần là PNG, JPG, WEBP hoặc SVG, dung lượng tối đa 1 MB");state.appBrand={logo,logoSize,updatedAt:Date.now()};audit(state,actor,"Cập nhật logo ứng dụng");return {ok:true};}
       return fail("Thao tác không hợp lệ");
     });
     res.status(result.status||200).json(result);
