@@ -602,7 +602,7 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
 }
 function PogShelfImage({file,selected,positions}:{file:PogFile;selected?:Product;positions:PogPosition[]}) {
   const width=file.shelfWidth||1600,height=file.shelfHeight||720;
-  return <svg className="pog-shelf-image" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${file.id}&asset=shelf`} width={width} height={height}/>{positions.map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width} ${position.y*height})`}><circle className="pog-marker-pulse" r="56"/><circle className="pog-marker-ring" r="40"/></g>)}</svg>;
+  return <svg className="pog-shelf-image" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${file.id}&asset=shelf`} width={width} height={height}/>{positions.map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width} ${position.y*height})`}><circle className="pog-marker-pulse" r="112"/><circle className="pog-marker-ring" r="80"/></g>)}</svg>;
 }
 function ShelfPlan({products,selectedId}:{products:Product[];selectedId?:string}) {
   return <div className="shelf-plan">{Array.from({length:8},(_,index)=>index+1).map((bay)=><div key={bay}><span>KỆ {bay}</span><section>{products.filter((p)=>p.bay===bay).map((p)=><article key={p.id} className={p.id===selectedId?"active":""}><small>{p.sku}</small><b>{p.name.slice(0,24)}</b></article>)}</section></div>)}</div>;
