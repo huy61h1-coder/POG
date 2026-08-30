@@ -43,6 +43,7 @@ function initialState() {
       { id:"p3",sku:"8969583",barcode:"8801260418800",supplierBarcode:"8801260418800",name:"BVS SOONSOOHANMYEON 23CM 18 MIẾNG",division:"10",divisionName:"HEALTH & BEAUTY",department:"1002",departmentName:"FEMININE CARE",line:"16",lineName:"NONFOOD",side:"A",bay:5,price:45000,stock:0,loss:0,expDate:"2027-01-10",updatedAt:now },
     ],
     accounts: [], sessions: [], roles: [], logs: [], picking: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
+    appBrand: { logo:"/aeon-logo.svg", updatedAt:now },
     lineConfigs: lineDefaults.map(([line,name,color,logo]) => ({ line,name,color,logo,updatedAt:now })),
   };
 }
@@ -84,6 +85,7 @@ function ensureStateShape(source) {
   state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
+  state.appBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?{logo:state.appBrand.logo,updatedAt:asInt(state.appBrand.updatedAt,Date.now())}:{logo:"/aeon-logo.svg",updatedAt:Date.now()};
   state.lineConfigs=Array.isArray(state.lineConfigs)&&state.lineConfigs.length?state.lineConfigs:lineDefaults.map(([line,name,color,logo])=>({line,name,color,logo,updatedAt:Date.now()}));
   return state;
 }
@@ -593,9 +595,9 @@ app.get("/api/store", async (req, res, next) => {
     if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập",setupRequired:state.accounts.length===0});
     const uploaded=stockIndex(state.stockRecords),accountsById=new Map(state.accounts.map((account)=>[account.id,account]));
     const pickItem=(item)=>{const product=state.products.find((p)=>p.id===item.productId),assignee=accountsById.get(item.userId);return product?{...withUploadedStock(product,uploaded),pickId:asText(item.id,item.productId),quantity:item.quantity,picked:item.picked,available:item.available!==false,customerName:asText(item.customerName),note:asText(item.note),assignedBy:asText(item.assignedBy),assigneeId:item.userId,assigneeName:asText(assignee?.name,"Nhân viên đã xóa")}:null;};
-    const picking=state.picking.filter((item)=>item.userId===actor.userId).map(pickItem).filter(Boolean),assignedPicking=canManage(actor.role)?state.picking.map(pickItem).filter(Boolean):[];
+    const picking=state.picking.filter((item)=>item.userId===actor.userId).map(pickItem).filter(Boolean),assignedPicking=(canManage(actor.role)?state.picking:state.picking.filter((item)=>item.userId===actor.userId)).map(pickItem).filter(Boolean);
     const users=(canManage(actor.role)?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount),summary=getProductSummary(state),manual=manualCheckGroups(state);
-    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,assignedPicking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,manualChecks:manual,stockImport:state.stockImport};
+    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,assignedPicking,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,appBrand:state.appBrand,manualChecks:manual,stockImport:state.stockImport};
     res.status(data.status||200).json(data);
   } catch (error) { next(error); }
 });
@@ -749,6 +751,7 @@ app.post("/api/store", async (req, res, next) => {
       if(action==="removePick"){const key=asText(body.pickId)||asText(body.productId);state.picking=state.picking.filter((p)=>!((p.id===key||p.productId===key)&&p.userId===actor.userId));audit(state,actor,"Bỏ sản phẩm khỏi đơn soạn");return {ok:true};}
       if(action==="clearPick"){state.picking=state.picking.filter((p)=>p.userId!==actor.userId);audit(state,actor,"Hoàn tất và làm trống đơn soạn");return {ok:true};}
       if(action==="updateLineConfig"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const source=body.lineConfig||{},line=cleanLine(source.line),name=asText(source.name).slice(0,48),color=asText(source.color).toUpperCase(),logo=asText(source.logo).slice(0,36);if(!name)return fail("Tên Line là bắt buộc");if(!/^#[0-9A-F]{6}$/.test(color))return fail("Màu cần theo định dạng #RRGGBB");const config={line,name,color,logo,updatedAt:Date.now()},index=state.lineConfigs.findIndex((item)=>item.line===line);if(index>=0)state.lineConfigs[index]=config;else state.lineConfigs.push(config);audit(state,actor,"Cập nhật layout Line "+line+": "+name);return {ok:true};}
+      if(action==="updateAppBrand"){if(actor.role!=="ADMIN")return fail("Chỉ Admin được thay đổi logo ứng dụng",403);const logo=asText(body.logo);if(logo!=="/aeon-logo.svg"&&(!/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(logo)||logo.length>1_500_000))return fail("Logo cần là PNG, JPG, WEBP hoặc SVG, dung lượng tối đa 1 MB");state.appBrand={logo:logo||"/aeon-logo.svg",updatedAt:Date.now()};audit(state,actor,"Cập nhật logo ứng dụng");return {ok:true};}
       return fail("Thao tác không hợp lệ");
     });
     res.status(result.status||200).json(result);
