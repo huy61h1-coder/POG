@@ -69,7 +69,7 @@ async function writeLocalState(state) {
 
 function asText(value, fallback = "") { return typeof value === "string" ? value.trim() : fallback; }
 function asInt(value, fallback = 0) { const n = Number(value); return Number.isFinite(n) ? Math.trunc(n) : fallback; }
-function cleanLine(value) { return asText(value, "01").replace(/\D/g, "").padStart(2, "0").slice(-2); }
+function cleanLine(value) { const digits=asText(value, "01").replace(/\D/g, ""); return (digits||"1").padStart(2, "0").slice(0, 3); }
 function canManage(role) { return role === "ADMIN" || role === "MANAGER"; }
 function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase(); }
 const defaultLineNames = new Map(lineDefaults.map(([line,name]) => [line,name.toUpperCase()]));
