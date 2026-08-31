@@ -132,6 +132,14 @@ try{
   assert.equal(updated.actor.userId,data.actor.userId);
   assert.equal(updated.picking[0].quantity,3);
 
+  const firstPogForm=new FormData();firstPogForm.set("line","16");firstPogForm.set("side","A");firstPogForm.set("file",new Blob(["first-pog"],{type:"application/pdf"}),"pog-part-1.pdf");
+  const firstPogResponse=await fetch(origin+"/api/pog",{method:"POST",headers:{cookie},body:firstPogForm});assert.equal(firstPogResponse.status,200);assert.equal((await firstPogResponse.json()).fileCount,1);
+  const secondPogForm=new FormData();secondPogForm.set("line","16");secondPogForm.set("side","A");secondPogForm.set("mode","append");secondPogForm.set("file",new Blob(["second-pog"],{type:"application/pdf"}),"pog-part-2.pdf");
+  const secondPogResponse=await fetch(origin+"/api/pog",{method:"POST",headers:{cookie},body:secondPogForm});assert.equal(secondPogResponse.status,200);assert.equal((await secondPogResponse.json()).fileCount,2);
+  const pogState=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();assert.equal(pogState.pogFiles[0].sources.length,2);
+  assert.equal(await (await fetch(origin+"/api/pog?id=16_A&source=0",{headers:{cookie}})).text(),"first-pog");
+  assert.equal(await (await fetch(origin+"/api/pog?id=16_A&source=1",{headers:{cookie}})).text(),"second-pog");
+
   const wrongLogin=await fetch(origin+"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({username:"admin.test",password:"wrong-password"})});
   assert.equal(wrongLogin.status,401);
   const createStaff=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"createAccount",account:{name:"Nhân viên kiểm thử",username:"staff.test",password:"StaffPass123",role:"STAFF"}})});
