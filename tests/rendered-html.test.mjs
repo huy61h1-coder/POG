@@ -140,6 +140,12 @@ try{
   assert.equal(await (await fetch(origin+"/api/pog?id=16_A&source=0",{headers:{cookie}})).text(),"first-pog");
   assert.equal(await (await fetch(origin+"/api/pog?id=16_A&source=1",{headers:{cookie}})).text(),"second-pog");
 
+  const otherLinePogForm=new FormData();otherLinePogForm.set("line","07");otherLinePogForm.set("side","B");otherLinePogForm.set("file",new Blob(["line-07b-pog"],{type:"application/pdf"}),"pog-line-07b.pdf");
+  const otherLinePogResponse=await fetch(origin+"/api/pog",{method:"POST",headers:{cookie},body:otherLinePogForm});assert.equal(otherLinePogResponse.status,200);
+  const otherLinePogState=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
+  assert.ok(otherLinePogState.pogFiles.some((item)=>item.id==="07_B"),"POG pipeline must work for every Line, not only Line 16");
+  assert.equal(await (await fetch(origin+"/api/pog?id=07_B&source=0",{headers:{cookie}})).text(),"line-07b-pog");
+
   const wrongLogin=await fetch(origin+"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({username:"admin.test",password:"wrong-password"})});
   assert.equal(wrongLogin.status,401);
   const createStaff=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"createAccount",account:{name:"Nhân viên kiểm thử",username:"staff.test",password:"StaffPass123",role:"STAFF"}})});
