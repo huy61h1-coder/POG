@@ -53,7 +53,7 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=4;
+const POG_ANALYSIS_VERSION=5;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -104,7 +104,9 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       const [x,y]=viewport.convertToViewportPoint(item.transform[4],item.transform[5]);
       tokens.push({text:item.str.trim(),x,y,fontSize:item.height});
     }
-    const tableHeader=tokens.find((token)=>/^loca/i.test(token.text));if(!tableHeader)continue;
+    // Các mẫu POG khác nhau đặt tên cột đầu là Location_ID, STT, No, SKU hoặc UPC.
+    // Chỉ dùng token tiêu đề cột chính xác để không nhầm tiêu đề trang thành bảng sản phẩm.
+    const tableHeader=tokens.find((token)=>/^(?:location[ _-]?id|stt|no\.?|number|sku|upc)$/i.test(token.text));if(!tableHeader)continue;
     const tableAreaTokens=tokens.filter((token)=>token.x>=tableHeader.x-5);
     const groups:PdfTextToken[][]=[];
     for(const token of [...tableAreaTokens].sort((a,b)=>a.y-b.y||a.x-b.x)){
