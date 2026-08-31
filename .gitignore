@@ -35,7 +35,7 @@ yarn-error.log*
 # vercel
 .vercel
 
-/dist/
+# /dist/ -- đã cho phép push lên GitHub để server dùng ngay sau git pull
 /.wrangler/
 /outputs/
 /work/
