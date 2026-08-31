@@ -268,7 +268,7 @@ export default function Home() {
   const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
   const pogLocationFor=(product:Pick<Product,"sku"|"barcode"|"supplierBarcode">)=>pogLocationIndex.get(normalize(product.sku))||pogLocationIndex.get(normalize(product.barcode))||pogLocationIndex.get(normalize(product.supplierBarcode));
   const withPogLocation=(product:Product):Product=>{const location=pogLocationFor(product);return {...product,shelfLine:location?.line||"",shelfSide:location?.side||"",shelfPosition:location?.position.number||0};};
-  const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,activePogSkus=[...new Set((activePogFile?.positions||[]).flatMap((position)=>[position.sku,position.barcode]).filter(Boolean))].join(","),importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
+  const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
 
   const loadData = useCallback(async (quiet=false) => {
     if (!quiet) setBusy(true);
@@ -316,11 +316,11 @@ export default function Home() {
     if(!actorUserId||!pogLine||!pogSide)return;
     const requestKey=[actorUserId,pogLine,pogSide,pogSearch.trim(),productRefresh,activePogUpdated].join("|");
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
-      const params=new URLSearchParams({pageSize:"200",skus:activePogSkus||"__no_pog_position__"});if(pogSearch.trim())params.set("q",pogSearch.trim());
+      const params=new URLSearchParams({pageSize:"200",pogId:activePogFile?.id||"__no_pog_position__"});if(pogSearch.trim())params.set("q",pogSearch.trim());
       try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage;if(response.ok){setPogProducts(payload.products.map(withPogLocation));setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
     },pogSearch.trim()?180:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
-  },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogSkus,pogLocationIndex]);
+  },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogFile?.id,pogLocationIndex]);
   useEffect(()=>{
     const jobId=importJob?.jobId;if(!actorUserId||!jobId||importJob.status==="uploading"||["completed","failed"].includes(importJob.status))return;
     let stopped=false,timer=0,failures=0;
