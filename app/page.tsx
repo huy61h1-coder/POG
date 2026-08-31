@@ -53,7 +53,7 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=5;
+const POG_ANALYSIS_VERSION=6;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -106,8 +106,10 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     }
     // Các mẫu POG khác nhau đặt tên cột đầu là Location_ID, STT, No, SKU hoặc UPC.
     // Chỉ dùng token tiêu đề cột chính xác để không nhầm tiêu đề trang thành bảng sản phẩm.
-    const tableHeader=tokens.find((token)=>/^(?:location[ _-]?id|stt|no\.?|number|sku|upc)$/i.test(token.text));if(!tableHeader)continue;
-    const tableAreaTokens=tokens.filter((token)=>token.x>=tableHeader.x-5);
+    const tableHeader=tokens.find((token)=>/^(?:location[ _-]?id|stt|no\.?|number|sku|upc)$/i.test(token.text));
+    // Một số file chỉ có ảnh/bảng không ghi tiêu đề cột; khi đó dùng toàn trang
+    // làm vùng dữ liệu và vẫn áp dụng cùng parser/crop như Line 16.
+    const tableAreaTokens=tableHeader?tokens.filter((token)=>token.x>=tableHeader.x-5):tokens;
     const groups:PdfTextToken[][]=[];
     for(const token of [...tableAreaTokens].sort((a,b)=>a.y-b.y||a.x-b.x)){
       const group=groups.find((candidate)=>Math.abs(candidate[0].y-token.y)<=5);
@@ -116,8 +118,8 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     const rows=parsePogRows(groups,pageNumber);
     const hasShelfStructure=tokens.some((token)=>/^(?:notch\b|mam\b|gondola\b|bay\b)/i.test(token.text)||/^\d+(?:[.,]\d+)?(?:m|cm)$/i.test(token.text));
     if(rows.length)allRows.push(...rows);if(rows.length<2||!hasShelfStructure)continue;
-    const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader.x,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
-    const leftShelf={x:0,y:0,width:tableLeft-14,height:viewport.height},candidates=[
+    const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader?.x??viewport.width*.78,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
+    const leftShelf={x:0,y:0,width:tableHeader?tableLeft-14:viewport.width,height:viewport.height},candidates=[
       {x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height},
       {x:0,y:0,width:viewport.width,height:tableTop-14},
       {x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}
