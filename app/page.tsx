@@ -53,7 +53,7 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=6;
+const POG_ANALYSIS_VERSION=7;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -77,7 +77,9 @@ function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,token
   const numeric=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height*.84&&token.fontSize>=5&&/^\d{1,3}[.)]?$/.test(token.text));
   const shelfLabels=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height&&/^(?:notch\b|mam\b|gondola\b|bay\b)/i.test(token.text));
   const measurements=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height&&/^\d+(?:[.,]\d+)?(?:m|cm)$/i.test(token.text));
-  if(numeric.length<2||(!shelfLabels.length&&!measurements.length))return null;
+  // POG của các Line có thể không in Notch/MAM/độ dài kệ. STT trên ảnh là
+  // dữ liệu chung bắt buộc, đủ để xác định vùng sản phẩm và đặt marker.
+  if(numeric.length<2)return null;
   const anchors=[...numeric,...shelfLabels,...measurements],anchorLeft=Math.min(...anchors.map((token)=>token.x)),anchorRight=Math.max(...anchors.map((token)=>token.x)),anchorTop=Math.min(...anchors.map((token)=>token.y)),anchorBottom=Math.max(...anchors.map((token)=>token.y));
   const context=canvas.getContext("2d",{willReadFrequently:true});if(!context)return null;
   const sx=Math.max(0,Math.floor(initial.x)),sy=Math.max(0,Math.floor(initial.y)),sw=Math.min(canvas.width-sx,Math.ceil(initial.width)),sh=Math.min(canvas.height-sy,Math.ceil(initial.height)),pixels=context.getImageData(sx,sy,sw,sh).data;
@@ -116,8 +118,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       if(group)group.push(token);else groups.push([token]);
     }
     const rows=parsePogRows(groups,pageNumber);
-    const hasShelfStructure=tokens.some((token)=>/^(?:notch\b|mam\b|gondola\b|bay\b)/i.test(token.text)||/^\d+(?:[.,]\d+)?(?:m|cm)$/i.test(token.text));
-    if(rows.length)allRows.push(...rows);if(rows.length<2||!hasShelfStructure)continue;
+    if(rows.length)allRows.push(...rows);if(rows.length<2)continue;
     const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader?.x??viewport.width*.78,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
     const leftShelf={x:0,y:0,width:tableHeader?tableLeft-14:viewport.width,height:viewport.height},candidates=[
       {x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height},
