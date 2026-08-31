@@ -611,6 +611,18 @@ app.get("/api/products", async(req,res,next)=>{
     const query=normalizeText(asText(req.query.q).slice(0,200)),line=asText(req.query.line),side=asText(req.query.side),stock=asText(req.query.stock,"all"),sort=asText(req.query.sort),pogId=asText(req.query.pogId),pogFile=pogId?state.pogFiles.find((file)=>file.id===pogId):null,skuValues=asText(req.query.skus).slice(0,20000).split(",").map(normalizeText).filter(Boolean),skuSet=new Set(skuValues),pogPositionSet=new Set((pogFile?.positions||[]).flatMap((position)=>[position.sku,position.barcode]).map(normalizeText).filter(Boolean)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize;
     const cacheKey=[query,line,side,stock,sort,pogId,pogFile?.updatedAt||0,skuValues.join(","),page,pageSize,asInt(state.stockImport?.updatedAt,0)].join("|");
     const apiCache=getProductApiCache(state.products),cached=apiCache.get(cacheKey);if(cached)return res.set("Cache-Control","no-store").json(cached);
+    // Khi mở POG, danh sách bên trái phải bắt đầu từ các dòng đã đọc trong
+    // chính file POG. Master Data/Stock chỉ bổ sung thông tin nếu mã khớp.
+    if(pogId){
+      const positions=pogFile?.positions||[],lookup=productLookup(state.products),byPosition=new Map();
+      for(const position of positions){
+        const keys=[position.sku,position.barcode].map(normalizeText).filter(Boolean),master=keys.map((key)=>lookup.get(key)).find(Boolean),record=uploaded.get(keys[0])||uploaded.get(keys[1]),base=master?withUploadedStock(master,uploaded):{id:"pog-"+pogId+"-"+position.number,sku:position.sku,name:position.name||"Sản phẩm đọc từ POG",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:position.barcode||position.sku,barcode:position.barcode||position.sku,line:pogFile?.line||"",lineName:"",side:pogFile?.side||"A",bay:1,price:0,stock:record?.stock||0,stockKnown:Boolean(record),loss:0,expDate:"",updatedAt:pogFile?.updatedAt||Date.now()};
+        const product={...base,sku:position.sku||base.sku,barcode:position.barcode||base.barcode||position.sku,supplierBarcode:base.supplierBarcode||position.barcode||position.sku,name:position.name||base.name};
+        const key=normalizeText(product.sku||product.barcode);if(key&&!byPosition.has(key))byPosition.set(key,product);
+      }
+      const ordered=[...byPosition.values()].filter((product)=>!query||productSearchText(product).includes(query)),payload={products:ordered.slice(start,start+pageSize),total:ordered.length,page,pageSize,matchedLines:[pogFile?.line||""]};
+      if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);return res.set("Cache-Control","no-store").json(payload);
+    }
     if(query&&!line&&!side&&!skuSet.size&&!pogId&&stock==="all"&&!sort){const exact=productLookup(state.products).get(query);if(exact){const product=withUploadedStock(exact,uploaded);return res.set("Cache-Control","no-store").json({products:[product],total:1,page:1,pageSize:1,matchedLines:[product.line]});}}
     if(!query&&(!line||line==="all")&&!side&&!skuSet.size&&!pogId&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total:state.products.length,page,pageSize,matchedLines:[]});
     const passesFilters=(product)=>{
