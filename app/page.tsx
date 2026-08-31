@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- POG uploads are served dynamically by the Node API. */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Role = "ADMIN" | "MANAGER" | "STAFF";
 type Tab = "DASHBOARD" | "MAP" | "PRODUCTS" | "CHECK_STOCK" | "STOCK" | "LOSS" | "DATE" | "ORDER" | "SUGGEST";
