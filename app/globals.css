@@ -98,6 +98,8 @@
   .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .check-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
+
+.line-token.unassigned{background:#eef1ef;color:#8a928d}
 @media(max-width:800px){
   .ops-topbar{height:64px;padding:0 12px;gap:9px}.ops-brand>b{width:52px;height:34px;font-size:12px}.global-search{height:42px;padding-left:12px}.global-search input{font-size:12px}.import-job-chip{position:fixed;left:12px;right:12px;bottom:76px;z-index:95;min-height:44px;justify-content:center;box-shadow:0 12px 30px rgba(65,34,52,.14)}.import-job-chip>span{display:flex;align-items:center;gap:8px;font-size:10px}.import-job-chip b{margin:0;font-size:10px}
   .ops-content{padding:23px 14px 92px}.page-head{gap:16px;margin-bottom:20px}.page-head h1{font-size:28px}.page-head>div>span{font-size:12px}.head-actions{width:100%}.head-actions .primary,.head-actions .ghost{flex:1;min-width:max-content}

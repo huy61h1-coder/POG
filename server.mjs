@@ -614,7 +614,7 @@ app.get("/api/products", async(req,res,next)=>{
     if(query&&!line&&!side&&!skuSet.size&&stock==="all"&&!sort){const exact=productLookup(state.products).get(query);if(exact){const product=withUploadedStock(exact,uploaded);return res.set("Cache-Control","no-store").json({products:[product],total:1,page:1,pageSize:1,matchedLines:[product.line]});}}
     if(!query&&(!line||line==="all")&&!side&&!skuSet.size&&stock==="all"&&!sort)return res.set("Cache-Control","no-store").json({products:state.products.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total:state.products.length,page,pageSize,matchedLines:[]});
     const passesFilters=(product)=>{
-      if(skuSet.size&&!skuSet.has(normalizeText(product.sku)))return false;if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;
+      if(skuSet.size&&![product.sku,product.barcode,product.supplierBarcode].map(normalizeText).some((key)=>skuSet.has(key)))return false;if(line&&line!=="all"&&product.line!==line)return false;if(side&&product.side!==side)return false;
       const current=uploaded.get(normalizeText(product.sku));
       if(stock==="available"&&!(current?.stock>0))return false;if(stock==="low"&&!(current?.stock>0&&current.stock<10))return false;if(stock==="out"&&current?.stock!==0)return false;
       return !query||productSearchText(product).includes(query);
