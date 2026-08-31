@@ -53,7 +53,7 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=7;
+const POG_ANALYSIS_VERSION=8;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -111,7 +111,8 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     const tableHeader=tokens.find((token)=>/^(?:location[ _-]?id|stt|no\.?|number|sku|upc)$/i.test(token.text));
     // Một số file chỉ có ảnh/bảng không ghi tiêu đề cột; khi đó dùng toàn trang
     // làm vùng dữ liệu và vẫn áp dụng cùng parser/crop như Line 16.
-    const tableAreaTokens=tableHeader?tokens.filter((token)=>token.x>=tableHeader.x-5):tokens;
+    const tableOnRight=Boolean(tableHeader&&tableHeader.x>=viewport.width*.45);
+    const tableAreaTokens=tableHeader?tokens.filter((token)=>tableOnRight?token.x>=tableHeader.x-5:token.x<=viewport.width*.58):tokens;
     const groups:PdfTextToken[][]=[];
     for(const token of [...tableAreaTokens].sort((a,b)=>a.y-b.y||a.x-b.x)){
       const group=groups.find((candidate)=>Math.abs(candidate[0].y-token.y)<=5);
@@ -119,13 +120,19 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     }
     const rows=parsePogRows(groups,pageNumber);
     if(rows.length)allRows.push(...rows);if(rows.length<2)continue;
-    const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader?.x??viewport.width*.78,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
-    const leftShelf={x:0,y:0,width:tableHeader?tableLeft-14:viewport.width,height:viewport.height},candidates=[
-      {x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height},
+    const rowYs=rows.map((row)=>row.y),rowGroups=groups.filter((group)=>parsePogRows([group],pageNumber).length>0),rowTokens=rowGroups.flat(),tableLeft=Math.min(...rowTokens.map((token)=>token.x)),tableRight=Math.max(...rowTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
+    // Ảnh kệ luôn được lấy từ vùng nằm kế bên bảng. Chọn vùng hợp lệ lớn nhất
+    // để hỗ trợ cả PDF đặt ảnh bên trái lẫn bên phải danh sách sản phẩm.
+    const sideCandidates=[
+      {x:0,y:0,width:tableLeft-14,height:viewport.height},
+      {x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height}
+    ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25);
+    const fallbackCandidates=[
       {x:0,y:0,width:viewport.width,height:tableTop-14},
       {x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}
-    ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25).sort((a,b)=>b.width*b.height-a.width*a.height);
-    let crop=leftShelf.width>viewport.width*.25?leftShelf:candidates[0];if(!crop)continue;
+    ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25);
+    const candidates=(sideCandidates.length?sideCandidates:fallbackCandidates).sort((a,b)=>b.width*b.height-a.width*a.height);
+    let crop=candidates[0];if(!crop)continue;
     const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
     const context=canvas.getContext("2d");if(!context)continue;
     await page.render({canvas,canvasContext:context,viewport}).promise;
@@ -140,6 +147,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     pieces.push({canvas:shelfCanvas,crop:{x:0,y:0,width:shelfCanvas.width,height:shelfCanvas.height},markers,page:pageNumber});
   }
   if(!pieces.length)return null;
+  pieces.sort((a,b)=>a.page-b.page);
   const targetHeight=1800,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
   const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context)return null;
   const positions:PogPosition[]=[],rendered:Array<{piece:typeof pieces[number];offset:number;scale:number}>=[];let offset=0;
