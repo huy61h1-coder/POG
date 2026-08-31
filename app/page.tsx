@@ -230,6 +230,7 @@ function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDe
 export default function Home() {
   const [data,setData] = useState<StoreData|null>(null);
   const [authMode,setAuthMode] = useState<"login"|"setup"|null>(null);
+  const [loginOpen,setLoginOpen] = useState(false);
   const [tab,setTab] = useState<Tab>("DASHBOARD");
   const [query,setQuery] = useState("");
   const [stockFilter,setStockFilter] = useState<"all"|"available"|"low"|"out">("all");
@@ -364,6 +365,7 @@ export default function Home() {
       const response=await fetch(authMode==="setup"?"/api/auth/setup":"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(credentials)});
       const result=await response.json() as {error?:string};
       if(!response.ok)throw new Error(result.error||"Không thể đăng nhập");
+      setLoginOpen(false);setAuthMode(null);
       await loadData(true);
     } catch(cause){setError(cause instanceof Error?cause.message:"Không thể đăng nhập");}
     finally{setBusy(false);}
@@ -371,7 +373,7 @@ export default function Home() {
 
   const logout = async () => {
     setBusy(true);
-    try{await fetch("/api/auth/logout",{method:"POST"});}finally{setSettingsOpen(false);setImportJob(null);setData(null);setAuthMode("login");setBusy(false);}
+    try{await fetch("/api/auth/logout",{method:"POST"});}finally{setSettingsOpen(false);setImportJob(null);setLoginOpen(false);setAuthMode(null);await loadData(true);setBusy(false);}
   };
 
   const productRequestKey=[tab,query.trim(),stockFilter,productPage,productRefresh].join("|"),productsCurrent=productResultKey===productRequestKey;
@@ -470,7 +472,7 @@ export default function Home() {
         <button className="top-order" onClick={()=>{setTab("ORDER");setProductPage(1);}}><span>ĐƠN SOẠN</span><b>{pickedCount}/{data.picking.length}</b><i><em style={{width:progress+"%"}}/></i></button>
         {importActive&&<button className="import-job-chip" onClick={()=>{setTab("PRODUCTS");setProductPage(1);}} title={importJob?.phase}><i/><span>Đang nhập Excel<b>{Math.round(importJob?.percent||0)}%</b></span></button>}
         <div className={"sync-chip "+(error?"offline":"online")} title={error||"Dữ liệu được tự động cập nhật mỗi 15 giây"}><i/>{error?"Mất kết nối":lastSyncedAt?"Đã đồng bộ":"Đang nối"}</div>
-        <button className="user-chip" onClick={()=>setSettingsOpen(true)}><span>{data.actor.name.slice(0,2).toUpperCase()}</span><b>{data.actor.name}<small>{data.actor.role}</small></b></button>
+        {data.actor.userId==="guest"?<button className="top-login-button" onClick={()=>{setAuthMode("login");setLoginOpen(true);setError("");}}>Đăng nhập</button>:<button className="user-chip" onClick={()=>setSettingsOpen(true)}><span>{data.actor.name.slice(0,2).toUpperCase()}</span><b>{data.actor.name}<small>{data.actor.role}</small></b></button>}
       </header>
 
       <div className="ops-body">
@@ -483,9 +485,9 @@ export default function Home() {
           }
           {tab==="PRODUCTS"&&<ProductsView products={products} total={productResult.total} role={data.actor.role} importResult={masterImport} importJob={importJob} onAdd={()=>setProductModal({...emptyProduct})} onEdit={(p)=>setProductModal({...p})} onDelete={(p)=>void mutate("deleteProduct",{id:p.id})} onMap={openProductOnMap} onPick={(p)=>void mutate("addPick",{productId:p.id})} onExport={exportCsv} onImport={()=>excelRef.current?.click()}/>}
           {tab==="CHECK_STOCK"&&<StockCheckView products={products} total={productResult.total} role={data.actor.role} metadata={data.stockImport} job={stockImportJob} onImport={()=>stockExcelRef.current?.click()} onExport={()=>{const link=document.createElement("a");link.href="/api/stock/export.csv";link.click();}} onAssign={(product)=>setAssignmentProduct(product)}/>} 
-          {tab==="STOCK"&&<ManualCheckGrid kind="stock" products={data.manualChecks.stock.map(withPogLocation)} onAdd={()=>addManualCheck("stock")}/>}
-          {tab==="LOSS"&&<ManualCheckGrid kind="loss" products={data.manualChecks.loss.map(withPogLocation)} onAdd={()=>addManualCheck("loss")}/>}
-          {tab==="DATE"&&<ManualCheckGrid kind="expiry" products={data.manualChecks.expiry.map(withPogLocation)} onAdd={()=>addManualCheck("expiry")}/>}
+          {tab==="STOCK"&&<ManualCheckGrid kind="stock" products={data.manualChecks.stock.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("stock")}/>}
+          {tab==="LOSS"&&<ManualCheckGrid kind="loss" products={data.manualChecks.loss.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("loss")}/>}
+          {tab==="DATE"&&<ManualCheckGrid kind="expiry" products={data.manualChecks.expiry.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("expiry")}/>}
           {(["PRODUCTS","CHECK_STOCK"] as Tab[]).includes(tab)&&<ProductPager page={productPage} pages={totalPages} total={productResult.total} busy={productsLoading} onPage={setProductPage}/>}
           {tab==="ORDER"&&<OrderView items={data.picking.map(withPogLocation)} assignedItems={data.assignedPicking.map(withPogLocation)} onToggle={(p)=>void mutate("togglePick",{pickId:p.pickId})} onAvailability={(p)=>void mutate("markPickAvailability",{pickId:p.pickId,available:!p.available})} onQuantity={(p,quantity)=>void mutate("updatePickQuantity",{pickId:p.pickId,quantity})} onRemove={(p)=>void mutate("removePick",{pickId:p.pickId})} onClear={()=>void mutate("clearPick")} onMap={openProductOnMap}/>}
           {tab==="SUGGEST"&&<SuggestView value={suggestInput} onValue={setSuggestInput} onGenerate={()=>void generateSuggestions()} result={suggestResult} busy={suggestBusy} error={suggestError} totalProducts={data.productTotal} onMap={(item)=>void openSuggested(item)} onPick={(item)=>void addSuggested(item)}/>}
@@ -504,8 +506,15 @@ export default function Home() {
         <PogModal modal={pogModal} setModal={setPogModal} products={visiblePogProducts} total={visiblePogTotal} file={activePog} search={pogSearch} setSearch={setPogSearch} canUpload={canManage(data.actor.role)} uploadRef={pogRef} onUpload={(file)=>void uploadPog(file)} onAppend={(file)=>void uploadPog(file,true)} onReanalyze={()=>void reanalyzePog()} onPageChange={(page)=>void savePogPage(page)} onPick={(product)=>void quickAdd(product)} onClose={()=>setPogModal(null)}/>
       }
       {scannerOpen&&<BarcodeScannerModal onClose={()=>setScannerOpen(false)} onDetected={(value)=>{setScannerOpen(false);setQuery(value);void handleBarcode(value);}} onError={setToast}/>} 
+      {loginOpen&&<LoginModal busy={busy} error={error} onSubmit={authenticate} onClose={()=>{setLoginOpen(false);setAuthMode(null);setError("");}}/>}
     </main>
   );
+}
+
+function LoginModal({busy,error,onSubmit,onClose}:{busy:boolean;error:string;onSubmit:(credentials:{username:string;password:string})=>Promise<void>;onClose:()=>void}) {
+  const [username,setUsername]=useState("");const [password,setPassword]=useState("");
+  const valid=username.trim().length>=3&&password.length>=8;
+  return <div className="modal-backdrop login-backdrop"><section className="auth-card login-modal" role="dialog" aria-modal="true" aria-label="Đăng nhập"><div className="modal-head"><div><p>TÀI KHOẢN NHÂN VIÊN</p><h2>Đăng nhập</h2></div><button onClick={onClose} aria-label="Đóng">×</button></div><div className="login-modal-body"><span>Đăng nhập để sử dụng quyền chỉnh sửa, upload và quản trị. Bạn vẫn có thể tra cứu dữ liệu ở chế độ khách.</span><form onSubmit={(event)=>{event.preventDefault();if(valid&&!busy)void onSubmit({username:username.trim().toLowerCase(),password});}}><label>Tên đăng nhập<input value={username} autoFocus autoCapitalize="none" autoComplete="username" onChange={(event)=>setUsername(event.target.value)} placeholder="Ví dụ: an.nguyen"/></label><label>Mật khẩu<input type="password" value={password} autoComplete="current-password" onChange={(event)=>setPassword(event.target.value)} placeholder="Tối thiểu 8 ký tự"/></label>{error&&<div className="auth-error" aria-live="polite">{error}</div>}<button disabled={!valid||busy}>{busy?<><i className="mini-spinner"/>Đang xử lý…</>:"Đăng nhập"}</button></form></div></section></div>;
 }
 
 function AuthScreen({mode,busy,error,onSubmit}:{mode:"login"|"setup";busy:boolean;error:string;onSubmit:(credentials:{username:string;password:string;name?:string})=>Promise<void>}) {
@@ -579,9 +588,9 @@ function AssignPickModal({product,users,customerNames,onClose,onAssign}:{product
   const [assigneeId,setAssigneeId]=useState(users[0]?.userId||""),[quantity,setQuantity]=useState(1),[customerName,setCustomerName]=useState(""),[note,setNote]=useState("");
   return <div className="modal-backdrop"><section className="form-modal"><div className="modal-head"><div><p>GÁN SOẠN ĐƠN TỪ STOCK</p><h2>Giao sản phẩm cho nhân viên</h2></div><button onClick={onClose}>×</button></div><div className="form-grid"><p className="form-note wide"><b>{product.name}</b><br/>SKU {product.sku} · Tồn hiện có: {money.format(product.stock)}</p><label className="wide">Nhân viên soạn đơn<select value={assigneeId} onChange={(event)=>setAssigneeId(event.target.value)}>{users.map((user)=><option key={user.userId} value={user.userId}>{user.name} · {user.role}</option>)}</select></label><label>Tên khách hàng<input list="assigned-customer-names" value={customerName} onChange={(event)=>setCustomerName(event.target.value)} placeholder="Chọn hoặc nhập tên khách"/><datalist id="assigned-customer-names">{customerNames.map((name)=><option key={name} value={name}/>)}</datalist></label><label>Số lượng<input type="number" min="1" max={product.stock} value={quantity} onChange={(event)=>setQuantity(Math.max(1,Number(event.target.value)||1))}/></label><label className="wide">Ghi chú Stock / đơn hàng<textarea rows={3} value={note} onChange={(event)=>setNote(event.target.value)} placeholder="Ví dụ: Ưu tiên hàng hạn dùng xa, giao buổi chiều…"/></label></div><div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" disabled={!assigneeId||!customerName.trim()||quantity>product.stock} onClick={()=>void onAssign({assigneeId,quantity,customerName:customerName.trim(),note:note.trim()})}>Gán cho nhân viên</button></div></section></div>;
 }
-function ManualCheckGrid({kind,products,onAdd}:{kind:"stock"|"loss"|"expiry";products:Product[];onAdd:()=>void}) {
+function ManualCheckGrid({kind,products,canEdit,onAdd}:{kind:"stock"|"loss"|"expiry";products:Product[];canEdit:boolean;onAdd:()=>void}) {
   const config=kind==="stock"?{eyebrow:"KIỂM KÊ THỦ CÔNG",title:"Kiểm tồn",subtitle:"Chỉ hiện các SKU đã được nhân viên nhập kiểm đếm thủ công.",label:"Tồn kiểm đếm",value:(p:Product)=>String(p.stock)}:kind==="loss"?{eyebrow:"KIỂM SOÁT THẤT THOÁT",title:"Thất thoát",subtitle:"Chỉ hiện các SKU đã được ghi nhận thủ công.",label:"Loss",value:(p:Product)=>String(p.loss)}:{eyebrow:"KIỂM TRA HẠN DÙNG",title:"Hạn dùng",subtitle:"Chỉ hiện các SKU đã được nhập hạn sử dụng thủ công.",label:"Hạn sử dụng",value:(p:Product)=>p.expDate};
-  return <div><PageHead eyebrow={config.eyebrow} title={config.title} subtitle={config.subtitle} actions={<button className="primary" onClick={onAdd}>+ Nhập thủ công</button>}/><div className="check-grid">{products.map((p)=><article key={p.id}><div className="card-top"><span className={"line-token "+(p.shelfLine?"line-"+p.shelfLine:"unassigned")}>{p.shelfLine?p.shelfLine+p.shelfSide:"—"}</span>{kind==="expiry"&&<span className={"badge "+expiryStatus(p.expDate).tone}>{expiryStatus(p.expDate).label}</span>}</div><h2>{p.name}</h2><p>SKU {p.sku} · {p.shelfLine?`POG Line ${p.shelfLine}${p.shelfSide} · Vị trí ${p.shelfPosition}`:"Chưa gán vị trí kệ POG"}</p><strong className="manual-value">{config.label}: {config.value(p)}</strong></article>)}{!products.length&&<div className="empty big grid-empty"><b>Chưa có dữ liệu nhập thủ công</b><span>Chọn “Nhập thủ công” và nhập SKU để tạo bản ghi đầu tiên.</span></div>}</div></div>;
+  return <div><PageHead eyebrow={config.eyebrow} title={config.title} subtitle={config.subtitle} actions={canEdit?<button className="primary" onClick={onAdd}>+ Nhập thủ công</button>:undefined}/><div className="check-grid">{products.map((p)=><article key={p.id}><div className="card-top"><span className={"line-token "+(p.shelfLine?"line-"+p.shelfLine:"unassigned")}>{p.shelfLine?p.shelfLine+p.shelfSide:"—"}</span>{kind==="expiry"&&<span className={"badge "+expiryStatus(p.expDate).tone}>{expiryStatus(p.expDate).label}</span>}</div><h2>{p.name}</h2><p>SKU {p.sku} · {p.shelfLine?`POG Line ${p.shelfLine}${p.shelfSide} · Vị trí ${p.shelfPosition}`:"Chưa gán vị trí kệ POG"}</p><strong className="manual-value">{config.label}: {config.value(p)}</strong></article>)}{!products.length&&<div className="empty big grid-empty"><b>Chưa có dữ liệu nhập thủ công</b><span>{canEdit?'Chọn “Nhập thủ công” và nhập SKU để tạo bản ghi đầu tiên.':'Đăng nhập để nhập dữ liệu kiểm tra thủ công.'}</span></div>}</div></div>;
 }
 function OrderView({items,assignedItems,onToggle,onAvailability,onQuantity,onRemove,onClear,onMap}:{items:PickItem[];assignedItems:AssignedPickItem[];onToggle:(p:PickItem)=>void;onAvailability:(p:PickItem)=>void;onQuantity:(p:PickItem,quantity:number)=>void;onRemove:(p:PickItem)=>void;onClear:()=>void;onMap:(p:PickItem)=>void}) {
   const route=["16","15","14","13","12","11","10","09","08","07","06","05","04","03","02","01","17","18","19","20","21","22","23","24","25","26","27","28"];

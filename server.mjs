@@ -756,6 +756,7 @@ app.post("/api/store", async (req, res, next) => {
         if(index>=0){const [item]=state.products.splice(index,1);state.picking=state.picking.filter((p)=>p.productId!==item.id);state.manualChecks=state.manualChecks.filter((check)=>check.productId!==item.id);audit(state,actor,"Xóa sản phẩm SKU "+item.sku);} return {ok:true};
       }
       if (action === "setManualCheck") {
+        if(actor.userId==="guest")return fail("Vui lòng đăng nhập để chỉnh sửa dữ liệu",401);
         const kind=asText(body.kind),sku=asText(body.sku),product=state.products.find((p)=>normalizeText(p.sku)===normalizeText(sku));if(!product)return fail("SKU không có trong Master Data",404);
         const value=body.value,now=Date.now(),index=state.manualChecks.findIndex((item)=>item.productId===product.id),current=index>=0?state.manualChecks[index]:{productId:product.id};
         if(kind==="stock")current.stock=Math.max(0,asInt(value));else if(kind==="loss")current.loss=Math.max(0,asInt(value));else if(kind==="expiry"){const date=asText(value);if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return fail("Hạn dùng cần theo định dạng ngày hợp lệ");current.expDate=date;}else return fail("Loại kiểm tra không hợp lệ");
