@@ -53,7 +53,7 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=8;
+const POG_ANALYSIS_VERSION=9;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -66,6 +66,14 @@ function parsePogRows(groups:PdfTextToken[][],page:number):PogRow[] {
     // Mẫu chuẩn: STT | SKU | barcode | tên sản phẩm.
     const skuAndBarcode=joined.match(/^(\d{1,4})[.)]?\s+([A-Z0-9-]{4,20})\s+(\d{6,20})\s+(.{2,})$/i);
     if(skuAndBarcode)return {number:Number(skuAndBarcode[1]),sku:skuAndBarcode[2],barcode:skuAndBarcode[3],name:skuAndBarcode[4].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page};
+    // Microsoft Print to PDF đôi khi ghép SKU 8 số và barcode 13 số thành
+    // một chuỗi 21 số (vd. 105319144895249104819). Tách từ phải sang trái
+    // để vẫn giữ đúng khóa liên kết với Stock và Master Data.
+    const gluedSkuAndBarcode=joined.match(/^(\d{1,4})[.)]?\s+(\d{18,33})(?=\D)\s*(.{2,})$/i);
+    if(gluedSkuAndBarcode){
+      const ids=gluedSkuAndBarcode[2],barcode=ids.slice(-13),sku=ids.slice(0,-13);
+      if(sku.length>=4)return {number:Number(gluedSkuAndBarcode[1]),sku,barcode,name:gluedSkuAndBarcode[3].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page};
+    }
     // Một số POG dùng Location_ID | UPC | Name. UPC là barcode liên kết Master Data.
     const upcAndName=joined.match(/^(\d{1,4})[.)]?\s+(\d{8,20})\s+(.{2,}?)(?:\s+(?:\d+|\*)\s+(?:\d+|\*))?$/);
     if(upcAndName)return {number:Number(upcAndName[1]),sku:upcAndName[2],barcode:upcAndName[2],name:upcAndName[3].trim(),y:group[0].y,page};
@@ -97,7 +105,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   if(file.type!=="application/pdf"&&!/\.pdf$/i.test(file.name))return null;
   const [pdfjs,worker]=await Promise.all([import("pdfjs-dist"),import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);pdfjs.GlobalWorkerOptions.workerSrc=worker.default;
   const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
-  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number}>=[],allRows:PogRow[]=[];
+  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
   for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
     const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:2.4}),textContent=await page.getTextContent();
     const tokens:PdfTextToken[]=[];
@@ -108,7 +116,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     }
     // Các mẫu POG khác nhau đặt tên cột đầu là Location_ID, STT, No, SKU hoặc UPC.
     // Chỉ dùng token tiêu đề cột chính xác để không nhầm tiêu đề trang thành bảng sản phẩm.
-    const tableHeader=tokens.find((token)=>/^(?:location[ _-]?id|stt|no\.?|number|sku|upc)$/i.test(token.text));
+    const tableHeader=tokens.find((token)=>/^(?:loca.*(?:id)?|stt|no\.?|number|sku|upc)$/i.test(token.text));
     // Một số file chỉ có ảnh/bảng không ghi tiêu đề cột; khi đó dùng toàn trang
     // làm vùng dữ liệu và vẫn áp dụng cùng parser/crop như Line 16.
     const tableOnRight=Boolean(tableHeader&&tableHeader.x>=viewport.width*.45);
@@ -119,7 +127,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       if(group)group.push(token);else groups.push([token]);
     }
     const rows=parsePogRows(groups,pageNumber);
-    if(rows.length)allRows.push(...rows);if(rows.length<2)continue;
+    if(rows.length)tables.push({groups,page:pageNumber});if(rows.length<2)continue;
     const rowYs=rows.map((row)=>row.y),rowGroups=groups.filter((group)=>parsePogRows([group],pageNumber).length>0),rowTokens=rowGroups.flat(),tableLeft=Math.min(...rowTokens.map((token)=>token.x)),tableRight=Math.max(...rowTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
     // Ảnh kệ luôn được lấy từ vùng nằm kế bên bảng. Chọn vùng hợp lệ lớn nhất
     // để hỗ trợ cả PDF đặt ảnh bên trái lẫn bên phải danh sách sản phẩm.
@@ -157,6 +165,9 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
     rendered.push({piece,offset,scale});
     offset+=pieceWidth-1;
   });
+  // Chỉ đọc và liên kết dữ liệu sau khi toàn bộ ảnh kệ đã được ghép xong.
+  // STT là cầu nối giữa marker trên ảnh; SKU/barcode là cầu nối tới Stock/Master.
+  const allRows=tables.flatMap(({groups,page})=>parsePogRows(groups,page));
   const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
   const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.97));
   return {image,width,height,positions,sourcePages:pieces.map((piece)=>piece.page)};
@@ -407,7 +418,7 @@ export default function Home() {
   const savePogAnalysis=async(file:File,line:string,side:"A"|"B",analysis:PogAnalysis|null,mode:"replace"|"append"|"reanalyze"="replace")=>{const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);form.set("mode",mode);if(analysis){form.set("shelfImage",analysis.image,`pog-${line}${side}-shelf.webp`);form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));form.set("analysisVersion",String(POG_ANALYSIS_VERSION));}const response=await fetch("/api/pog",{method:"POST",body:form}),result=await response.json() as {error?:string;mappedCount?:number;analyzedPages?:number;fileCount?:number};if(!response.ok)throw new Error(result.error||"Không thể tải POG");return result;};
   const uploadPogFor = async (file:File|undefined,line:string,side:"A"|"B",silent=false,append=false) => {
     if(!file)return false;if(!silent)setBusy(true);
-    try {const existing=data?.pogFiles.find((record)=>record.id===line+"_"+side),sourceFiles=append&&existing?[...await loadPogSourceFiles(existing),file]:[file],analysis=await analyzePogFiles(sourceFiles),result=await savePogAnalysis(file,line,side,analysis,append?"append":"replace");if(!silent){await loadData(true);setToast(analysis?`Đã ghép ${result.fileCount||sourceFiles.length} file · ${result.mappedCount||0} vị trí sản phẩm`:`Đã cập nhật POG ${line}${side} · PDF chưa có bảng chữ để tự phân tích`);}return Boolean(analysis);
+    try {const existing=data?.pogFiles.find((record)=>record.id===line+"_"+side),sourceFiles=append&&existing?[...await loadPogSourceFiles(existing),file]:[file],analysis=await analyzePogFiles(sourceFiles),result=await savePogAnalysis(file,line,side,analysis,append?"append":"replace");if(!silent){await loadData(true);setToast(analysis?`Đã ghép ${result.fileCount||sourceFiles.length} file · ${result.mappedCount||0} vị trí sản phẩm`:`POG ${line}${side} chưa nhận diện được bảng STT · SKU · barcode · tên sản phẩm`);}return Boolean(analysis);
     } catch(cause){if(!silent)setToast(cause instanceof Error?cause.message:"Không thể tải POG");return false;} finally{if(!silent){setBusy(false);if(pogRef.current)pogRef.current.value="";}}
   };
   const uploadPog = async (file?:File,append=false) => { if(pogModal)await uploadPogFor(file,pogModal.line,pogModal.side,false,append); };
