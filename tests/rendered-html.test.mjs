@@ -95,8 +95,8 @@ try{
   assert.deepEqual(await health.json(),{ok:true,storage:"local-json"});
 
   const anonymous=await fetch(origin+"/api/store");
-  assert.equal(anonymous.status,401);
-  assert.equal((await anonymous.json()).setupRequired,true);
+  assert.equal(anonymous.status,200);
+  assert.equal((await anonymous.json()).actor.role,"STAFF");
   const setupResponse=await fetch(origin+"/api/auth/setup",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name:"Quản trị kiểm thử",username:"admin.test",password:"StrongPass123"})});
   assert.equal(setupResponse.status,200);
   const cookie=(setupResponse.headers.get("set-cookie")||"").split(";")[0];
@@ -240,12 +240,12 @@ try{
   assert.equal(compactAfterBulk.productTotal,12003);
   const disableManager=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:staffAccount.userId,active:false}})});
   assert.equal(disableManager.status,200);
-  assert.equal((await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).status,401);
+  assert.equal((await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).status,200);
 
   const logoutResponse=await fetch(origin+"/api/auth/logout",{method:"POST",headers:{cookie}});
   assert.equal(logoutResponse.status,200);
   assert.match(logoutResponse.headers.get("set-cookie")||"",/Max-Age=0/);
-  assert.equal((await fetch(origin+"/api/store",{headers:{cookie}})).status,401);
+  assert.equal((await fetch(origin+"/api/store",{headers:{cookie}})).status,200);
 
   const missing=await fetch(origin+"/api/does-not-exist");
   assert.equal(missing.status,404);

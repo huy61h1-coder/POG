@@ -381,10 +381,13 @@ app.use("/api",(req,res,next)=>{
 });
 app.get("/healthz", (_req,res) => res.json({ ok:true, storage:pool?"postgres":"local-json" }));
 
+const guestActor={userId:"guest",username:"guest",email:"guest",name:"Khách xem",role:"STAFF",active:true};
 function actorFrom(req, state) {
   const tokenHash=req.fulfillmentSessionId?createHash("sha256").update(req.fulfillmentSessionId).digest("hex"):"";
   const session=state.sessions.find((item)=>item.tokenHash===tokenHash&&item.expiresAt>Date.now());
-  if(!session)return null;
+  // Cho phép truy cập giao diện và các API đọc dữ liệu ở chế độ khách.
+  // Các request ghi dữ liệu vẫn không có actor và tiếp tục bị bảo vệ.
+  if(!session)return ["GET","HEAD"].includes(req.method)?guestActor:null;
   const account=state.accounts.find((item)=>item.id===session.accountId&&item.active!==false);
   return account?publicAccount(account):null;
 }
@@ -817,8 +820,7 @@ app.get("/api/stock/import/:jobId",async(req,res,next)=>{
 
 app.post("/api/ai/suggest", async (req, res, next) => {
   try {
-    const state=await store.read(),actor=actorFrom(req,state);
-    if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const state=await store.read(),actor=actorFrom(req,state)||guestActor;
     const query=asText(req.body?.query).slice(0,500);
     if(query.length<2)return res.status(400).json({error:"Hãy mô tả nhu cầu bằng ít nhất 2 ký tự."});
     const cacheKey=normalizeText(query)+"|"+asInt(state.stockImport?.updatedAt,0),cached=suggestionCache.get(cacheKey);
