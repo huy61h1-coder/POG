@@ -12,7 +12,7 @@ type Actor = { userId:string; username:string; email:string; name:string; role:R
 type Audit = { id:string; action:string; userId:string; userName:string; createdAt:number };
 type UserRole = { userId:string; username:string; email:string; name:string; role:Role; active:boolean; createdAt:number; updatedAt?:number };
 type PogPosition = { number:number; sku:string; barcode:string; name:string; x:number; y:number };
-type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; page?:number; shelfImage?:boolean; shelfWidth?:number; shelfHeight?:number; positions?:PogPosition[]; updatedAt:number };
+type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; page?:number; shelfImage?:boolean; shelfWidth?:number; shelfHeight?:number; positions?:PogPosition[]; analysisVersion?:number; updatedAt:number };
 type LineConfig = { line:string; name:string; color:string; logo:string; updatedAt?:number };
 type AiSuggestion = { productId:string; sku:string; name:string; line:string; side:"A"|"B"; bay:number; price:number; stock:number; quantity:number; reason:string };
 type AiSuggestionResult = { mode:"ai"|"local"; model:string|null; summary:string; notice:string; items:AiSuggestion[]; productCount:number };
@@ -52,6 +52,7 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
+const POG_ANALYSIS_VERSION=2;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -208,6 +209,7 @@ export default function Home() {
   const excelRef = useRef<HTMLInputElement>(null);
   const stockExcelRef = useRef<HTMLInputElement>(null);
   const pogRef = useRef<HTMLInputElement>(null);
+  const pogAutoAnalysisRef = useRef(new Set<string>());
   const searchCacheRef = useRef(new Map<string,ProductPage>());
   const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,activePogShelf=Boolean(activePogFile?.shelfImage),activePogSkus=[...new Set((activePogFile?.positions||[]).map((position)=>position.sku).filter(Boolean))].join(","),importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
 
@@ -367,7 +369,7 @@ export default function Home() {
     if(!file)return false;if(!silent)setBusy(true);
     try { const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);
       const analysis=await analyzePogPdf(file);
-      if(analysis){form.set("shelfImage",analysis.image,file.name.replace(/\.pdf$/i,"")+"-shelf.webp");form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));}
+      if(analysis){form.set("shelfImage",analysis.image,file.name.replace(/\.pdf$/i,"")+"-shelf.webp");form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));form.set("analysisVersion",String(POG_ANALYSIS_VERSION));}
       const response=await fetch("/api/pog",{method:"POST",body:form});const result=await response.json() as {error?:string;mappedCount?:number;analyzedPages?:number};if(!response.ok)throw new Error(result.error||"Không thể tải POG");
       if(!silent){await loadData(true);setToast(analysis?`Đã ghép ${result.analyzedPages||analysis.sourcePages.length} trang · liên kết ${result.mappedCount||0} sản phẩm`:`Đã cập nhật POG ${line}${side} · PDF chưa có bảng chữ để tự phân tích`);}return Boolean(analysis);
     } catch(cause){if(!silent)setToast(cause instanceof Error?cause.message:"Không thể tải POG");return false;} finally{if(!silent){setBusy(false);if(pogRef.current)pogRef.current.value="";}}
@@ -375,6 +377,9 @@ export default function Home() {
   const uploadPog = async (file?:File) => { if(pogModal)await uploadPogFor(file,pogModal.line,pogModal.side); };
   const reanalyzePog = async () => { if(!pogModal||!activePog)return;try{const response=await fetch("/api/pog?id="+encodeURIComponent(activePog.id),{cache:"no-store"});if(!response.ok)throw new Error("Không thể đọc lại PDF POG");const blob=await response.blob(),file=new File([blob],activePog.fileName,{type:activePog.mimeType});await uploadPogFor(file,pogModal.line,pogModal.side);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể ghép lại POG");} };
   const reanalyzeAllPogs = async () => { const files=(data?.pogFiles||[]).filter((file)=>file.mimeType==="application/pdf");if(!files.length){setToast("Chưa có PDF POG để áp dụng.");return;}setBusy(true);let completed=0;try{for(const source of files){const response=await fetch("/api/pog?id="+encodeURIComponent(source.id),{cache:"no-store"});if(!response.ok)continue;const blob=await response.blob(),file=new File([blob],source.fileName,{type:source.mimeType});if(await uploadPogFor(file,source.line,source.side,true))completed++;}await loadData(true);setToast(`Đã áp dụng cơ chế ghép POG cho ${completed}/${files.length} Line/mặt có PDF.`);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể ghép lại toàn bộ POG");}finally{setBusy(false);} };
+  // Mỗi phiên bản pipeline chỉ tự xử lý một lần cho từng bản PDF đã lưu.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{const sources=(data?.pogFiles||[]).filter((source)=>source.mimeType==="application/pdf"&&(!source.shelfImage||(source.analysisVersion||0)<POG_ANALYSIS_VERSION)&&!pogAutoAnalysisRef.current.has(`${source.id}:${source.updatedAt}:${POG_ANALYSIS_VERSION}`));if(!canManage(data?.actor.role)||!sources.length)return;for(const source of sources)pogAutoAnalysisRef.current.add(`${source.id}:${source.updatedAt}:${POG_ANALYSIS_VERSION}`);const timer=window.setTimeout(async()=>{let completed=0;try{for(const source of sources){const response=await fetch("/api/pog?id="+encodeURIComponent(source.id),{cache:"no-store"});if(!response.ok)continue;const blob=await response.blob(),file=new File([blob],source.fileName,{type:source.mimeType});if(await uploadPogFor(file,source.line,source.side,true))completed++;}await loadData(true);if(completed)setToast(`Đã tự động chuẩn hóa ${completed}/${sources.length} Line/mặt theo POG 16A.`);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tự động chuẩn hóa toàn bộ POG");}},350);return()=>window.clearTimeout(timer);},[data?.pogFiles,data?.actor.role]);
   const savePogPage = async (page:number) => { if(!pogModal)return; await mutate("updatePogPage",{line:pogModal.line,side:pogModal.side,page}); };
   const generateSuggestions = async () => {
     const value=suggestInput.trim();
