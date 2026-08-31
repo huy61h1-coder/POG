@@ -53,19 +53,32 @@ const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:""
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=3;
+const POG_ANALYSIS_VERSION=4;
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
 type PogRow = { number:number; sku:string; barcode:string; name:string; y:number; page:number };
 type CropBox = { x:number; y:number; width:number; height:number };
 
+function parsePogRows(groups:PdfTextToken[][],page:number):PogRow[] {
+  return groups.map((group)=>{
+    const sorted=[...group].sort((a,b)=>a.x-b.x),joined=sorted.map((token)=>token.text).join(" ").replace(/\s+/g," ").trim();
+    // Mẫu chuẩn: STT | SKU | barcode | tên sản phẩm.
+    const skuAndBarcode=joined.match(/^(\d{1,4})[.)]?\s+([A-Z0-9-]{4,20})\s+(\d{6,20})\s+(.{2,})$/i);
+    if(skuAndBarcode)return {number:Number(skuAndBarcode[1]),sku:skuAndBarcode[2],barcode:skuAndBarcode[3],name:skuAndBarcode[4].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page};
+    // Một số POG dùng Location_ID | UPC | Name. UPC là barcode liên kết Master Data.
+    const upcAndName=joined.match(/^(\d{1,4})[.)]?\s+(\d{8,20})\s+(.{2,}?)(?:\s+(?:\d+|\*)\s+(?:\d+|\*))?$/);
+    if(upcAndName)return {number:Number(upcAndName[1]),sku:upcAndName[2],barcode:upcAndName[2],name:upcAndName[3].trim(),y:group[0].y,page};
+    return null;
+  }).filter((row):row is PogRow=>Boolean(row));
+}
+
 function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,tokens:PdfTextToken[]):CropBox|null {
   const numeric=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height*.84&&token.fontSize>=5&&/^\d{1,3}[.)]?$/.test(token.text));
-  const notches=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height&&/^notch\b/i.test(token.text));
+  const shelfLabels=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height&&/^(?:notch\b|mam\b|gondola\b|bay\b)/i.test(token.text));
   const measurements=tokens.filter((token)=>token.x>=initial.x&&token.x<=initial.x+initial.width&&token.y>=initial.y&&token.y<=initial.y+initial.height&&/^\d+(?:[.,]\d+)?(?:m|cm)$/i.test(token.text));
-  if(numeric.length<2||(!notches.length&&!measurements.length))return null;
-  const anchors=[...numeric,...notches,...measurements],anchorLeft=Math.min(...anchors.map((token)=>token.x)),anchorRight=Math.max(...anchors.map((token)=>token.x)),anchorTop=Math.min(...anchors.map((token)=>token.y)),anchorBottom=Math.max(...anchors.map((token)=>token.y));
+  if(numeric.length<2||(!shelfLabels.length&&!measurements.length))return null;
+  const anchors=[...numeric,...shelfLabels,...measurements],anchorLeft=Math.min(...anchors.map((token)=>token.x)),anchorRight=Math.max(...anchors.map((token)=>token.x)),anchorTop=Math.min(...anchors.map((token)=>token.y)),anchorBottom=Math.max(...anchors.map((token)=>token.y));
   const context=canvas.getContext("2d",{willReadFrequently:true});if(!context)return null;
   const sx=Math.max(0,Math.floor(initial.x)),sy=Math.max(0,Math.floor(initial.y)),sw=Math.min(canvas.width-sx,Math.ceil(initial.width)),sh=Math.min(canvas.height-sy,Math.ceil(initial.height)),pixels=context.getImageData(sx,sy,sw,sh).data;
   const dark=(x:number,y:number)=>{const index=(y*sw+x)*4;return pixels[index]<125&&pixels[index+1]<125&&pixels[index+2]<125;};
@@ -98,12 +111,8 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       const group=groups.find((candidate)=>Math.abs(candidate[0].y-token.y)<=5);
       if(group)group.push(token);else groups.push([token]);
     }
-    const rows:PogRow[]=groups.map((group)=>{
-      const sorted=[...group].sort((a,b)=>a.x-b.x),joined=sorted.map((token)=>token.text).join(" ").replace(/\s+/g," ").trim();
-      const match=joined.match(/^(\d{1,4})[.)]?\s+([A-Z0-9-]{4,20})\s+(\d{6,20})\s+(.{2,})$/i);
-      return match?{number:Number(match[1]),sku:match[2],barcode:match[3],name:match[4].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/," ").trim(),y:group[0].y,page:pageNumber}:null;
-    }).filter((row):row is PogRow=>Boolean(row));
-    const hasShelfStructure=tokens.some((token)=>/^notch\b/i.test(token.text)||/^\d+(?:[.,]\d+)?(?:m|cm)$/i.test(token.text));
+    const rows=parsePogRows(groups,pageNumber);
+    const hasShelfStructure=tokens.some((token)=>/^(?:notch\b|mam\b|gondola\b|bay\b)/i.test(token.text)||/^\d+(?:[.,]\d+)?(?:m|cm)$/i.test(token.text));
     if(rows.length)allRows.push(...rows);if(rows.length<2||!hasShelfStructure)continue;
     const rowYs=rows.map((row)=>row.y),tableLeft=tableHeader.x,tableRight=Math.max(...tableAreaTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
     const leftShelf={x:0,y:0,width:tableLeft-14,height:viewport.height},candidates=[
