@@ -52,6 +52,16 @@ function AppIcon({name}:{name:Tab}) {
 const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"",barcode:"",line:"01",lineName:"SOUVENIR",side:"A",bay:1,price:0,stock:0,loss:0,expDate:"" };
 const money = new Intl.NumberFormat("vi-VN");
 const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
+// Máy quét/camera đôi khi trả về tiền tố định dạng (ví dụ ]C1) hoặc chữ
+// mô tả. Giữ nguyên số 0 ở đầu nhưng chỉ lấy chuỗi số dài nhất để truy vấn
+// đúng barcode trong Master Data/Stock.
+const normalizeScannedBarcode = (rawValue:string) => {
+  const raw=String(rawValue||"").trim().replace(/^\](?:[A-Za-z]\d?)/,"");
+  const compact=raw.replace(/\D/g,"");
+  if(compact.length>=6&&!/[A-Za-z]/.test(raw))return compact;
+  const runs=raw.match(/\d+/g)||[];
+  return runs.sort((a,b)=>b.length-a.length)[0]||"";
+};
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
 const POG_ANALYSIS_VERSION=10;
 
@@ -205,26 +215,32 @@ function StockBadge({stock,known=true}:{stock:number;known?:boolean}) {
   return <span className={"badge " + (stock === 0 ? "danger" : stock < 10 ? "warning" : "success")}>{stock === 0 ? "Hết hàng" : stock < 10 ? "Sắp hết · " + stock : "Còn hàng · " + stock}</span>;
 }
 
+function BarcodeIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 4v16M6 4v16M9 7v10M12 4v16M15 4v16M18 7v10M21 4v16"/></svg>;
+}
+
 function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDetected:(value:string)=>void;onError:(message:string)=>void}) {
   const videoRef=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),frameRef=useRef<number>(0),zxingRef=useRef<{stop:()=>void}|null>(null);
+  const detectedRef=useRef(onDetected),errorRef=useRef(onError);
   const [status,setStatus]=useState("Đang mở camera…");const [manual,setManual]=useState("");
+  useEffect(()=>{detectedRef.current=onDetected;errorRef.current=onError;},[onDetected,onError]);
   useEffect(()=>{
     let stopped=false;
     const stop=()=>{if(frameRef.current)cancelAnimationFrame(frameRef.current);zxingRef.current?.stop();zxingRef.current=null;streamRef.current?.getTracks().forEach((track)=>track.stop());streamRef.current=null;};
     const start=async()=>{
       try {
-        if(!navigator.mediaDevices?.getUserMedia)throw new Error("Trình duyệt không hỗ trợ camera. Hãy dùng máy quét USB hoặc nhập mã.");
+        if(!navigator.mediaDevices?.getUserMedia)throw new Error("Trình duyệt không hỗ trợ camera. Hãy dùng HTTPS/localhost, máy quét USB hoặc nhập mã.");
         const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});if(stopped){stream.getTracks().forEach((track)=>track.stop());return;}
         streamRef.current=stream;const video=videoRef.current;if(!video)return;video.srcObject=stream;await video.play();
         const Detector=(window as unknown as {BarcodeDetector?:new(options?:{formats?:string[]})=>{detect:(source:ImageBitmapSource)=>Promise<Array<{rawValue?:string}>>}}).BarcodeDetector;
-        if(!Detector){setStatus("Đang tải bộ nhận diện barcode…");const {BrowserMultiFormatReader}=await import("@zxing/browser");if(stopped)return;const reader=new BrowserMultiFormatReader();setStatus("Đang nhận diện barcode…");const controls=await reader.decodeFromStream(stream,video,(result)=>{const value=result?.getText();if(value){stop();onDetected(value);}});if(!stopped)zxingRef.current=controls;return;}
+        if(!Detector){setStatus("Đang tải bộ nhận diện barcode…");const {BrowserMultiFormatReader}=await import("@zxing/browser");if(stopped)return;const reader=new BrowserMultiFormatReader();setStatus("Đang nhận diện barcode…");const controls=await reader.decodeFromStream(stream,video,(result)=>{const value=normalizeScannedBarcode(result?.getText()||"");if(value){stop();detectedRef.current(value);}});if(!stopped)zxingRef.current=controls;return;}
         const detector=new Detector({formats:["ean_13","ean_8","code_128","code_39","upc_a","upc_e","qr_code"]});setStatus("Đưa barcode vào giữa khung hình…");
-        const scan=async()=>{if(stopped||!videoRef.current)return;try{const found=await detector.detect(videoRef.current);const value=found.find((item)=>item.rawValue)?.rawValue;if(value){stop();onDetected(value);return;}}catch{ /* next frame can retry */ }frameRef.current=requestAnimationFrame(()=>void scan());};void scan();
-      } catch(cause) { const message=cause instanceof Error?cause.message:"Không thể mở camera";setStatus(message);onError(message); }
+        const scan=async()=>{if(stopped||!videoRef.current)return;try{const found=await detector.detect(videoRef.current);const value=normalizeScannedBarcode(found.find((item)=>item.rawValue)?.rawValue||"");if(value){stop();detectedRef.current(value);return;}}catch{ /* next frame can retry */ }frameRef.current=requestAnimationFrame(()=>void scan());};void scan();
+      } catch(cause) { const error=cause as DOMException;const message=error?.name==="NotAllowedError"?"Chưa được cấp quyền camera. Hãy cho phép camera hoặc dùng HTTPS/localhost, máy quét USB hay nhập mã.":cause instanceof Error?cause.message:"Không thể mở camera";setStatus(message);errorRef.current(message); }
     };
     void start();return()=>{stopped=true;stop();};
-  },[onDetected,onError]);
-  return <div className="modal-backdrop barcode-modal"><section className="scanner-card" role="dialog" aria-modal="true" aria-label="Quét barcode"><div className="modal-head"><div><p>QUÉT SẢN PHẨM</p><h2>Quét barcode</h2></div><button onClick={onClose}>×</button></div><div className="scanner-video"><video ref={videoRef} muted playsInline/><span className="scanner-frame"/></div><p>{status}</p><form className="scanner-manual" onSubmit={(event)=>{event.preventDefault();if(manual.trim())onDetected(manual.trim());}}><input value={manual} onChange={(event)=>setManual(event.target.value)} placeholder="Hoặc nhập / quét bằng máy quét USB"/><button className="primary" disabled={!manual.trim()}>Tìm</button></form><button className="ghost scanner-close" onClick={onClose}>Đóng</button></section></div>;
+  },[]);
+  return <div className="modal-backdrop barcode-modal"><section className="scanner-card" role="dialog" aria-modal="true" aria-label="Quét barcode"><div className="modal-head"><div><p>QUÉT SẢN PHẨM</p><h2>Quét barcode</h2></div><button onClick={onClose}>×</button></div><div className="scanner-video"><video ref={videoRef} muted playsInline/><span className="scanner-frame"/></div><p>{status}</p><form className="scanner-manual" onSubmit={(event)=>{event.preventDefault();const value=normalizeScannedBarcode(manual);if(value)onDetected(value);}}><input value={manual} onChange={(event)=>setManual(event.target.value)} inputMode="numeric" placeholder="Hoặc nhập / quét bằng máy quét USB"/><button className="primary" disabled={!normalizeScannedBarcode(manual)}>Tìm</button></form><button className="ghost scanner-close" onClick={onClose}>Đóng</button></section></div>;
 }
 
 export default function Home() {
@@ -419,9 +435,9 @@ export default function Home() {
     const value=window.prompt(label);if(value===null||!value.trim())return;void mutate("setManualCheck",{kind,sku,value});
   };
 
-  const openProductOnMap = (product:Product) => { const location=pogLocationFor(product);if(!location){setToast("SKU này chưa được gán vị trí kệ từ POG.");return;}setPogModal({line:location.line,side:location.side,selectedId:product.id});setPogSearch(product.sku);setQuery("");setProductPage(1); };
-  const quickAdd = async (product:Product) => { if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}if(await mutate("addPick",{productId:product.id,quantity:1})){setQuery("");setProductPage(1);} };
-  const handleBarcode = async (rawValue:string) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact);else if(payload.products[0])openProductOnMap(payload.products[0]);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
+  const openProductOnMap = (product:Product,keepQuery=false) => { const location=pogLocationFor(product);if(!location){setToast("SKU này chưa được gán vị trí kệ từ POG.");return;}setPogModal({line:location.line,side:location.side,selectedId:product.id});setPogSearch(product.sku);if(!keepQuery)setQuery("");setProductPage(1); };
+  const quickAdd = async (product:Product,keepQuery=false) => { if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}if(await mutate("addPick",{productId:product.id,quantity:1})){if(!keepQuery)setQuery("");setProductPage(1);} };
+  const handleBarcode = async (rawValue:string,keepQuery=false) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact,keepQuery);else if(payload.products[0])openProductOnMap(payload.products[0],keepQuery);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
   const handleSearchEnter = async () => { await handleBarcode(query); };
   const loadPogSourceFiles=async(record:PogFile)=>{const sources=record.sources?.length?record.sources:[{fileName:record.fileName,mimeType:record.mimeType}],files:File[]=[];for(let index=0;index<sources.length;index++){const response=await fetch(`/api/pog?id=${encodeURIComponent(record.id)}&source=${index}`,{cache:"no-store"});if(!response.ok)throw new Error("Không thể đọc file POG "+(index+1));const blob=await response.blob(),source=sources[index];files.push(new File([blob],source.fileName,{type:source.mimeType}));}return files;};
   const savePogAnalysis=async(file:File,line:string,side:"A"|"B",analysis:PogAnalysis|null,mode:"replace"|"append"|"reanalyze"="replace")=>{const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);form.set("mode",mode);if(analysis){form.set("shelfImage",analysis.image,`pog-${line}${side}-shelf.webp`);form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));form.set("analysisVersion",String(POG_ANALYSIS_VERSION));}const response=await fetch("/api/pog",{method:"POST",body:form}),result=await response.json() as {error?:string;mappedCount?:number;analyzedPages?:number;fileCount?:number};if(!response.ok)throw new Error(result.error||"Không thể tải POG");return result;};
@@ -465,7 +481,7 @@ export default function Home() {
         <button className="ops-brand" aria-label="AEON Fulfillment SmartOps" onClick={()=>{setTab("DASHBOARD");setProductPage(1);}}><img style={{"--brand-logo-width":(data.appBrand?.logoSize||220)+"px"} as React.CSSProperties} src={data.appBrand?.logo||"/aeon-logo.svg"} alt="AEON Fulfillment SmartOps"/></button>
         <div className="global-search">
           <span>⌕</span><input value={query} onChange={(e)=>{setQuery(e.target.value);setProductPage(1);}} onKeyDown={(e)=>{if(e.key==="Enter")void handleSearchEnter()}} placeholder="Tìm hoặc quét SKU, barcode…" />
-          <button className="barcode-trigger" title="Quét barcode bằng camera" aria-label="Quét barcode bằng camera" onClick={()=>setScannerOpen(true)}>▣</button>
+          <button className="barcode-trigger" title="Quét barcode bằng camera" aria-label="Quét barcode bằng camera" onClick={()=>setScannerOpen(true)}><BarcodeIcon/></button>
           {query&&<button onClick={()=>{setQuery("");setProductPage(1);}}>×</button>}
           {query.length>=2&&<div className="search-popover">{productsLoading?<div className="search-empty"><i className="mini-spinner"/><b>Đang tìm sản phẩm…</b></div>:<>{searchMatches.map((p)=>{const location=pogLocationFor(p);return <article key={p.id}><button className="search-result-main" onClick={()=>openProductOnMap(p)}><span><b>{p.name}</b><small>SKU {p.sku} · {location?`POG Line ${location.line}${location.side} · Vị trí ${location.position.number}`:"Chưa gán vị trí kệ POG"}</small></span><StockBadge stock={p.stock}/></button><button className="search-quick-add" disabled={p.stock===0} onClick={()=>void quickAdd(p)}>+ Đơn</button></article>;})}{!searchMatches.length&&<div className="search-empty"><b>Không tìm thấy sản phẩm</b><span>Kiểm tra lại SKU, barcode hoặc tên hàng.</span></div>}</>}</div>}
         </div>
@@ -505,7 +521,7 @@ export default function Home() {
       {pogModal&&
         <PogModal modal={pogModal} setModal={setPogModal} products={visiblePogProducts} total={visiblePogTotal} file={activePog} search={pogSearch} setSearch={setPogSearch} canUpload={canManage(data.actor.role)} uploadRef={pogRef} onUpload={(file)=>void uploadPog(file)} onAppend={(file)=>void uploadPog(file,true)} onReanalyze={()=>void reanalyzePog()} onPageChange={(page)=>void savePogPage(page)} onPick={(product)=>void quickAdd(product)} onClose={()=>setPogModal(null)}/>
       }
-      {scannerOpen&&<BarcodeScannerModal onClose={()=>setScannerOpen(false)} onDetected={(value)=>{setScannerOpen(false);setQuery(value);void handleBarcode(value);}} onError={setToast}/>} 
+      {scannerOpen&&<BarcodeScannerModal onClose={()=>setScannerOpen(false)} onDetected={(rawValue)=>{const value=normalizeScannedBarcode(rawValue);if(!value){setToast("Không đọc được barcode dạng số");return;}setScannerOpen(false);setQuery(value);setProductPage(1);void handleBarcode(value,true);}} onError={setToast}/>} 
       {loginOpen&&<LoginModal busy={busy} error={error} onSubmit={authenticate} onClose={()=>{setLoginOpen(false);setAuthMode(null);setError("");}}/>}
     </main>
   );
