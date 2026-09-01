@@ -2,6 +2,9 @@
 /* eslint-disable @next/next/no-img-element -- POG uploads are served dynamically by the Node API. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BrowserMultiFormatReader } from "@zxing/browser";
+import * as pdfjs from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 type Role = "ADMIN" | "MANAGER" | "STAFF";
 type Tab = "DASHBOARD" | "MAP" | "PRODUCTS" | "CHECK_STOCK" | "STOCK" | "LOSS" | "DATE" | "ORDER" | "SUGGEST";
@@ -113,7 +116,9 @@ function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,token
 
 async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   if(file.type!=="application/pdf"&&!/\.pdf$/i.test(file.name))return null;
-  const [pdfjs,worker]=await Promise.all([import("pdfjs-dist"),import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);pdfjs.GlobalWorkerOptions.workerSrc=worker.default;
+  // Giữ bộ đọc PDF trong bundle chính thay vì tải động. Một số host chỉ
+  // đồng bộ file index nhưng bỏ sót chunk động pdf-*.js sau khi deploy.
+  pdfjs.GlobalWorkerOptions.workerSrc=pdfWorkerUrl;
   const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
   const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
   for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
@@ -233,7 +238,7 @@ function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDe
         const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});if(stopped){stream.getTracks().forEach((track)=>track.stop());return;}
         streamRef.current=stream;const video=videoRef.current;if(!video)return;video.srcObject=stream;await video.play();
         const Detector=(window as unknown as {BarcodeDetector?:new(options?:{formats?:string[]})=>{detect:(source:ImageBitmapSource)=>Promise<Array<{rawValue?:string}>>}}).BarcodeDetector;
-        if(!Detector){setStatus("Đang tải bộ nhận diện barcode…");const {BrowserMultiFormatReader}=await import("@zxing/browser");if(stopped)return;const reader=new BrowserMultiFormatReader();setStatus("Đang nhận diện barcode…");const controls=await reader.decodeFromStream(stream,video,(result)=>{const value=normalizeScannedBarcode(result?.getText()||"");if(value){stop();detectedRef.current(value);}});if(!stopped)zxingRef.current=controls;return;}
+        if(!Detector){setStatus("Đang nhận diện barcode…");const reader=new BrowserMultiFormatReader();const controls=await reader.decodeFromStream(stream,video,(result)=>{const value=normalizeScannedBarcode(result?.getText()||"");if(value){stop();detectedRef.current(value);}});if(!stopped)zxingRef.current=controls;return;}
         const detector=new Detector({formats:["ean_13","ean_8","code_128","code_39","upc_a","upc_e","qr_code"]});setStatus("Đưa barcode vào giữa khung hình…");
         const scan=async()=>{if(stopped||!videoRef.current)return;try{const found=await detector.detect(videoRef.current);const value=normalizeScannedBarcode(found.find((item)=>item.rawValue)?.rawValue||"");if(value){stop();detectedRef.current(value);return;}}catch{ /* next frame can retry */ }frameRef.current=requestAnimationFrame(()=>void scan());};void scan();
       } catch(cause) { const error=cause as DOMException;const message=error?.name==="NotAllowedError"?"Chưa được cấp quyền camera. Hãy cho phép camera hoặc dùng HTTPS/localhost, máy quét USB hay nhập mã.":cause instanceof Error?cause.message:"Không thể mở camera";setStatus(message);errorRef.current(message); }
