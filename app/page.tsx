@@ -432,13 +432,15 @@ export default function Home() {
   const importActive=Boolean(importJob&&["uploading","queued","processing"].includes(importJob.status));
   const totalPages=Math.max(1,Math.ceil(productResult.total/productResult.pageSize));
   const manualCheckLossProducts=useMemo(()=>{
-    const current=data.manualChecks.checkLoss||[];
+    const manualChecks=data?.manualChecks;
+    if(!manualChecks)return [];
+    const current=manualChecks.checkLoss||[];
     if(current.length)return current;
     const merged=new Map<string,Product>();
-    for(const product of data.manualChecks.stock||[])merged.set(product.id,{...product,manualStock:product.stock});
-    for(const product of data.manualChecks.loss||[])merged.set(product.id,{...(merged.get(product.id)||product),manualLoss:product.loss});
+    for(const product of manualChecks.stock||[])merged.set(product.id,{...product,manualStock:product.stock});
+    for(const product of manualChecks.loss||[])merged.set(product.id,{...(merged.get(product.id)||product),manualLoss:product.loss});
     return [...merged.values()];
-  },[data.manualChecks.checkLoss,data.manualChecks.stock,data.manualChecks.loss]);
+  },[data?.manualChecks]);
 
   const exportCsv = () => {
     const link=document.createElement("a");link.href="/api/master-data/export.csv";link.download="MasterData_Fulfillment.csv";document.body.appendChild(link);link.click();link.remove();
