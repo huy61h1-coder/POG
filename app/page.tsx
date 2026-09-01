@@ -511,7 +511,7 @@ export default function Home() {
       {toast&&<div className="toast">{toast}</div>}
       {busy&&<div className="busy-line"/>}
       <header className="ops-topbar">
-        <button className="ops-brand" aria-label="AEON Fulfillment SmartOps" onClick={()=>{setTab("DASHBOARD");setProductPage(1);}}><img style={{"--brand-logo-scale":(desktopLogoSize/220).toFixed(3),"--brand-logo-scale-mobile":(mobileLogoSize/120).toFixed(3),"--brand-logo-slot-width":Math.max(140,Math.min(320,desktopLogoSize))+"px","--brand-logo-slot-width-mobile":Math.max(96,Math.min(220,mobileLogoSize))+"px"} as React.CSSProperties} src={data.appBrand?.logo||"/aeon-logo.svg"} alt="AEON Fulfillment SmartOps"/></button>
+        <button className="ops-brand" style={{"--brand-logo-width":`${desktopLogoSize}px`,"--brand-logo-width-mobile":`${mobileLogoSize}px`} as React.CSSProperties} aria-label="AEON Fulfillment SmartOps" onClick={()=>{setTab("DASHBOARD");setProductPage(1);}}><img src={data.appBrand?.logo||"/aeon-logo.svg"} alt="AEON Fulfillment SmartOps"/></button>
         <div className="global-search">
           <span>⌕</span><input value={query} onChange={(e)=>{setQuery(e.target.value);setProductPage(1);}} onKeyDown={(e)=>{if(e.key==="Enter")void handleSearchEnter()}} placeholder="Tìm hoặc quét SKU, barcode…" />
           <button className="barcode-trigger" title="Quét barcode bằng camera" aria-label="Quét barcode bằng camera" onClick={()=>setScannerOpen(true)}><BarcodeIcon/></button>
@@ -560,6 +560,10 @@ export default function Home() {
           if(data.actor.role==="ADMIN"){
             const saved=await mutate("updateAppBrand",{logo:changes.logo,logoSize:changes.logoSizeDesktop,logoSizeDesktop:changes.logoSizeDesktop,logoSizeMobile:changes.logoSizeMobile});
             if(!saved)return false;
+            // Apply the saved values immediately as well. This keeps the
+            // header responsive even when an older running API only echoes
+            // the legacy `logoSize` field in its next response.
+            setData((current)=>current?{...current,appBrand:{logo:changes.logo,logoSize:changes.logoSizeDesktop,logoSizeDesktop:changes.logoSizeDesktop,logoSizeMobile:changes.logoSizeMobile,updatedAt:Date.now()}}:current);
           }
           setTheme(changes.theme);
           return true;
