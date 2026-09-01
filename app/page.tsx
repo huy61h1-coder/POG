@@ -549,7 +549,27 @@ export default function Home() {
 
       {productModal&&<ProductModal value={productModal} onChange={setProductModal} onClose={()=>setProductModal(null)} onSave={async()=>{if(await mutate("upsertProduct",{product:productModal}))setProductModal(null);}}/>}
       {assignmentProduct&&<AssignPickModal product={assignmentProduct} users={data.users.filter((user)=>user.active)} customerNames={[...new Set(data.assignedPicking.map((item)=>item.customerName?.trim()).filter(Boolean) as string[])]} onClose={()=>setAssignmentProduct(null)} onAssign={async(assignment)=>{if(await mutate("assignPick",{productId:assignmentProduct.id,...assignment}))setAssignmentProduct(null);}}/>}
-      {settingsOpen&&<SettingsModal actor={data.actor} users={data.users} theme={theme} appLogo={data.appBrand?.logo||"/aeon-logo.svg"} logoSizeDesktop={desktopLogoSize} logoSizeMobile={mobileLogoSize} onSaveAppearance={async(changes)=>{if(data.actor.role==="ADMIN"){const saved=await mutate("updateAppBrand",{logo:changes.logo,logoSizeDesktop:changes.logoSizeDesktop,logoSizeMobile:changes.logoSizeMobile});if(!saved)return false;}setTheme(changes.theme);return true;}} onCreate={(account)=>mutate("createAccount",{account})} onUpdate={(account)=>mutate("updateAccount",{account})} onPassword={(currentPassword,newPassword)=>mutate("changeOwnPassword",{currentPassword,newPassword})} onLogout={logout} onClose={()=>setSettingsOpen(false)}/>}
+      {settingsOpen&&<SettingsModal
+        actor={data.actor}
+        users={data.users}
+        theme={theme}
+        appLogo={data.appBrand?.logo||"/aeon-logo.svg"}
+        logoSizeDesktop={desktopLogoSize}
+        logoSizeMobile={mobileLogoSize}
+        onSaveAppearance={async(changes)=>{
+          if(data.actor.role==="ADMIN"){
+            const saved=await mutate("updateAppBrand",{logo:changes.logo,logoSize:changes.logoSizeDesktop,logoSizeDesktop:changes.logoSizeDesktop,logoSizeMobile:changes.logoSizeMobile});
+            if(!saved)return false;
+          }
+          setTheme(changes.theme);
+          return true;
+        }}
+        onCreate={(account)=>mutate("createAccount",{account})}
+        onUpdate={(account)=>mutate("updateAccount",{account})}
+        onPassword={(currentPassword,newPassword)=>mutate("changeOwnPassword",{currentPassword,newPassword})}
+        onLogout={logout}
+        onClose={()=>setSettingsOpen(false)}
+      />}
       {lineModal&&<LineConfigModal value={lineModal} onChange={setLineModal} onClose={()=>setLineModal(null)} onUploadPog={(file,line,side)=>void uploadPogFor(file,line,side)} onSave={async()=>{if(await mutate("updateLineConfig",{lineConfig:lineModal}))setLineModal(null);}}/>}
       {pogModal&&
         <PogModal modal={pogModal} setModal={setPogModal} products={visiblePogProducts} total={visiblePogTotal} file={activePog} search={pogSearch} setSearch={setPogSearch} canUpload={canManage(data.actor.role)} uploadRef={pogRef} onUpload={(file)=>void uploadPog(file)} onAppend={(file)=>void uploadPog(file,true)} onReanalyze={()=>void reanalyzePog()} onPageChange={(page)=>void savePogPage(page)} onPick={(product)=>void quickAdd(product)} onClose={()=>setPogModal(null)}/>
