@@ -134,12 +134,25 @@ function audit(state, actor, action) {
 const aiRateWindows = new Map();
 const aiIntentGroups = [
   { triggers:["canh chua","canh chua ca","canh chua tom"], keywords:["ca","tom","thit","dau bam","ca chua","dua","bac ha","rau","gia vi","nuoc mam","me","chanh","ot","hanh","ngo"] },
-  { triggers:["lau","hotpot"], keywords:["rau","nam","thit","hai san","tom","ca","mi","bun","sot","nuoc dung","do uong"] },
-  { triggers:["nuong","bbq"], keywords:["thit","hai san","sot","gia vi","do uong","giay","khay"] },
-  { triggers:["bua sang","an sang"], keywords:["sua","banh","ngu coc","ca phe","tra","trung"] },
-  { triggers:["sinh nhat","tiec"], keywords:["banh","keo","chocolate","nuoc","tra","ca phe","trang tri"] },
-  { triggers:["du lich","da ngoai","picnic"], keywords:["nuoc","banh","mi","do hop","khan","tui","nonfood"] },
+  { triggers:["pho bo","pho","noodle soup"], keywords:["banh pho","bo","thit bo","hanh","rau thom","gia do","chanh","ot","nuoc mam","tieu","que","hoi"] },
+  { triggers:["pho ga","chicken pho"], keywords:["banh pho","ga","thit ga","hanh","rau thom","gia do","chanh","ot","nuoc mam","tieu"] },
+  { triggers:["bun bo","bun thit nuong"], keywords:["bun","bo","thit bo","thit heo","rau song","gia do","sa","hanh","nuoc mam","ot","dau phong"] },
+  { triggers:["bun cha","bun nem"], keywords:["bun","thit heo","cha","rau song","du du","ca rot","nuoc mam","hanh","toi","ot"] },
+  { triggers:["goi cuon","cuon","spring roll"], keywords:["banh trang","bun","tom","thit heo","rau song","xa lach","dua leo","hanh","nuoc cham"] },
+  { triggers:["com chien","com rang","fried rice"], keywords:["gao","com","trung","thit","tom","ca rot","dau ha lan","hanh","dau an","nuoc tuong"] },
+  { triggers:["mi xao","mi tron","stir fry"], keywords:["mi","thit","tom","hai san","rau","cai","ca rot","dau an","nuoc tuong","dau hao"] },
+  { triggers:["lau","hotpot"], keywords:["rau","nam","thit","hai san","tom","ca","dau phu","mi","bun","sot","nuoc dung","sa","ot","do uong"] },
+  { triggers:["nuong","bbq","grill"], keywords:["thit","bo","heo","ga","hai san","tom","muc","rau","nam","sot","nuoc tuong","dau an","do uong"] },
+  { triggers:["salad","sa lat","rau tron"], keywords:["xa lach","rau","ca chua","dua leo","bap","ca rot","trung","uc ga","ca ngu","sot","dau oliu","chanh"] },
+  { triggers:["ga ran","ga chien","fried chicken"], keywords:["ga","thit ga","bot chien","bot mi","dau an","tuong ot","tuong ca","chanh","salad"] },
+  { triggers:["cari","ca ri","curry"], keywords:["thit bo","thit ga","tom","khoai tay","ca rot","hanh","nuoc cot dua","bot ca ri","sa","ot","gao"] },
+  { triggers:["sushi","sashimi"], keywords:["gao","rong bien","ca hoi","ca ngu","tom","trung","dua leo","bo","giam","nuoc tuong","wasabi"] },
+  { triggers:["banh mi","sandwich"], keywords:["banh mi","thit","cha","trung","pho mai","bo","xa lach","ca chua","dua leo","sot"] },
+  { triggers:["bua sang","an sang"], keywords:["sua","banh","ngu coc","ca phe","tra","trung","yogurt","pho mai","trai cay"] },
+  { triggers:["sinh nhat","tiec"], keywords:["banh","keo","chocolate","nuoc","tra","ca phe","trang tri","dia","ly"] },
+  { triggers:["du lich","da ngoai","picnic"], keywords:["nuoc","banh","mi","do hop","khan","tui","thit","xuc xich","trai cay","nonfood"] },
 ];
+const aiStopWords = new Set(["cho","voi","va","cua","mot","nhieu","nguoi","phan","mon","can","mua","nau","lam","tai","theo","uu","tien","dang","co","san","pham"]);
 
 function availableProducts(products) {
   const today = new Date().toISOString().slice(0,10);
@@ -194,7 +207,7 @@ function pushExpiryTop(heap,product,limit){
 
 function intentTerms(query) {
   const normalized = normalizeText(query);
-  const terms = new Set(normalized.split(/[^a-z0-9]+/).filter((term) => term.length > 1));
+  const terms = new Set(normalized.split(/[^a-z0-9]+/).filter((term) => term.length > 1&&!aiStopWords.has(term)&&!/^[0-9]+$/.test(term)));
   for (const group of aiIntentGroups) if (group.triggers.some((trigger) => normalized.includes(trigger))) group.keywords.forEach((term) => terms.add(term));
   return [...terms];
 }
@@ -203,8 +216,10 @@ function rankedProducts(query, products) {
   const terms = intentTerms(query);
   return availableProducts(products).map((product) => {
     const haystack = productSearchText(product);
-    const score = terms.reduce((total,term) => total + (haystack.includes(term) ? (term.length > 3 ? 5 : 2) : 0),0) + Math.min(2,product.stock/20);
-    return { product, score };
+    const tokens = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
+    const matchedTerms=terms.filter((term)=>tokens.has(term)||haystack.includes(term));
+    const score = matchedTerms.reduce((total,term) => total + (tokens.has(term) ? (term.length > 3 ? 7 : 3) : (term.includes(" ") ? 6 : 1)),0) + Math.min(2,product.stock/20);
+    return { product, score, matchedTerms };
   }).sort((a,b) => b.score-a.score || b.product.stock-a.product.stock);
 }
 
@@ -214,17 +229,18 @@ function localProductSuggestions(query, products, notice = "") {
   const ranked = rankedProducts(query, products);
   const matching = ranked.filter((entry) => entry.score > 2.1);
   const selected = (matching.length ? matching : ranked).slice(0,12);
+  const coverage=`Đã rà soát ${products.length.toLocaleString("vi-VN")} SKU còn tồn từ Master Data và Stock.`;
   return {
     mode:"local",
     model:null,
     summary:selected.length
       ? "Đã chọn "+selected.length+" sản phẩm có sẵn phù hợp nhất với nhu cầu của bạn."
       : "Hiện chưa có sản phẩm còn hàng phù hợp trong danh sách.",
-    notice,
-    items:selected.map(({product}) => ({
+    notice:[notice,coverage].filter(Boolean).join(" "),
+    items:selected.map(({product,matchedTerms}) => ({
       productId:product.id,sku:product.sku,name:product.name,line:product.line,side:product.side,bay:product.bay,
       price:product.price,stock:product.stock,quantity:1,
-      reason:"Phù hợp theo tên hàng, nhóm Line và lượng tồn hiện có."
+      reason:matchedTerms.length?"Khớp nguyên liệu "+matchedTerms.slice(0,3).join(", ")+" · còn "+product.stock:"Được chọn theo lượng tồn hiện có và danh mục Master Data."
     }))
   };
 }
@@ -241,7 +257,7 @@ async function openAiProductSuggestions(query, products) {
   if(!apiKey)return localProductSuggestions(query,products,"Chưa cấu hình khóa AI; ứng dụng đang dùng bộ phân tích nội bộ.");
   const model=asText(process.env.OPENAI_MODEL,"gpt-5.4-mini");
   const baseUrl=asText(process.env.OPENAI_BASE_URL,"https://api.openai.com/v1").replace(/\/+$/,"");
-  const catalogLimit=Math.max(50,Math.min(1000,asInt(process.env.AI_PRODUCT_LIMIT,800)));
+  const catalogLimit=Math.max(50,Math.min(2000,asInt(process.env.AI_PRODUCT_LIMIT,1200)));
   const catalog=rankedProducts(query,products).slice(0,catalogLimit).map(({product}) => ({
     productId:product.id,sku:product.sku,name:product.name,division:product.division,divisionName:product.divisionName,
     department:product.department,departmentName:product.departmentName,supplierBarcode:product.supplierBarcode,
@@ -294,7 +310,7 @@ async function openAiProductSuggestions(query, products) {
       return [{...product,quantity:Math.max(1,Math.min(20,asInt(item.quantity,1))),reason:asText(item.reason,"Phù hợp với nhu cầu đã nhập.").slice(0,160)}];
     });
     if(!items.length)return localProductSuggestions(query,products,"AI chưa tìm được kết quả hợp lệ; đã chuyển sang phân tích nội bộ.");
-    return {mode:"ai",model,summary:asText(parsed.summary,"Đã tìm thấy "+items.length+" sản phẩm phù hợp.").slice(0,300),notice:"",items};
+    return {mode:"ai",model,summary:asText(parsed.summary,"Đã tìm thấy "+items.length+" sản phẩm phù hợp.").slice(0,300),notice:`Đã rà soát ${products.length.toLocaleString("vi-VN")} SKU còn tồn từ Master Data và Stock.`,items};
   } catch(error) {
     console.error("AI suggestion fallback:",error instanceof Error?error.message:"unknown error");
     return localProductSuggestions(query,products,"AI tạm thời chưa phản hồi; kết quả dưới đây được phân tích nội bộ.");
@@ -881,7 +897,7 @@ app.post("/api/ai/suggest", async (req, res, next) => {
       if(retryAfter){res.set("Retry-After",String(retryAfter));return res.status(429).json({error:"Bạn đang phân tích quá nhanh. Vui lòng thử lại sau "+retryAfter+" giây."});}
     }
     const productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
-    const stockProducts=state.stockRecords.map((record)=>{const product=productsBySku.get(normalizeText(record.sku));return product?{...product,stock:record.stock,stockKnown:true,loss:0,expDate:"",sales:record.sales||0}:null;}).filter((product)=>product&&product.stock>0).sort((a,b)=>b.stock-a.stock).slice(0,5000);
+    const stockProducts=state.stockRecords.map((record)=>{const product=productsBySku.get(normalizeText(record.sku));return product?{...product,stock:record.stock,stockKnown:true,loss:0,expDate:"",sales:record.sales||0}:null;}).filter((product)=>product&&product.stock>0).sort((a,b)=>b.stock-a.stock);
     const suggestions=await openAiProductSuggestions(query,stockProducts);
     const result={...suggestions,productCount:stockProducts.length};
     suggestionCache.set(cacheKey,{result,expiresAt:Date.now()+60_000});if(suggestionCache.size>100){const oldest=suggestionCache.keys().next().value;if(oldest)suggestionCache.delete(oldest);}

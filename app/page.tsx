@@ -714,9 +714,9 @@ function AssignedOrdersView({items}:{items:AssignedPickItem[]}) {
 }
 function SuggestView({value,onValue,onGenerate,result,busy,error,totalProducts,onMap,onPick}:{value:string;onValue:(v:string)=>void;onGenerate:()=>void;result:AiSuggestionResult|null;busy:boolean;error:string;totalProducts:number;onMap:(item:AiSuggestion)=>void;onPick:(item:AiSuggestion)=>void}) {
   const examples=["Lẩu cho 4 người","BBQ cuối tuần","Bữa sáng nhanh","Tiệc sinh nhật"];
-  return <div className="ai-page"><PageHead eyebrow="TRỢ LÝ AI" title="Gợi ý sản phẩm" subtitle="Phân tích trực tiếp danh sách hàng, tồn kho và vị trí kệ hiện có." actions={<span className="ai-catalog-status"><i/>{totalProducts} SKU sẵn sàng</span>}/>
+  return <div className="ai-page"><PageHead eyebrow="TRỢ LÝ AI" title="Gợi ý sản phẩm" subtitle="Nhập món ăn để AI đối chiếu toàn bộ Master Data và chọn nguyên liệu đang còn tồn." actions={<span className="ai-catalog-status"><i/>{totalProducts.toLocaleString("vi-VN")} SKU Master Data</span>}/>
     <section className="ai-query-card">
-      <div className="ai-query-title"><span>AI</span><div><b>Bạn đang chuẩn bị gì?</b><small>Mô tả món ăn, sự kiện hoặc nhu cầu; kết quả chỉ lấy từ Master Data.</small></div></div>
+      <div className="ai-query-title"><span>AI</span><div><b>Bạn đang chuẩn bị gì?</b><small>Mô tả món ăn, sự kiện hoặc nhu cầu; hệ thống sẽ rà soát danh mục và chỉ đề xuất sản phẩm còn tồn trong Stock.</small></div></div>
       <div className="ai-query-box">
         <textarea rows={2} value={value} disabled={busy} onChange={(event)=>onValue(event.target.value)} onKeyDown={(event)=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();onGenerate();}}} placeholder="Ví dụ: Chuẩn bị lẩu cho 6 người, ưu tiên sản phẩm còn nhiều tồn…"/>
         <button disabled={busy||value.trim().length<2} onClick={onGenerate}>{busy?<><i className="mini-spinner"/>Đang phân tích…</>:<>✦ Phân tích</>}</button>
