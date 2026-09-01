@@ -154,6 +154,7 @@ const aiIntentGroups = [
 ];
 const aiStopWords = new Set(["cho","voi","va","cua","mot","nhieu","nguoi","phan","mon","can","mua","nau","lam","tai","theo","uu","tien","dang","co","san","pham"]);
 const aiDishWords = new Set(["pho","bun","com","lau","salad","sushi","sashimi","curry","cari","mi","goi","banh","nuong","bbq","sandwich","spring","roll"]);
+const aiEssentialTerms = new Set(["banh pho","thit bo","bo","thit ga","ga","bun","thit heo","heo","tom","ca","hai san","nam","rau","xa lach","gao","com","trung","dau phu","khoai tay","ca rot","banh trang","mi","banh mi","pho mai","ca hoi","ca ngu","xuc xich","thit","muc"]);
 
 function availableProducts(products) {
   const today = new Date().toISOString().slice(0,10);
@@ -220,7 +221,7 @@ function rankedProducts(query, products) {
     const tokenList=haystack.split(/[^a-z0-9]+/).filter(Boolean),tokens = new Set(tokenList);
     const matchesTerm=(term)=>{const parts=term.split(/\s+/).filter(Boolean);if(parts.length===1)return tokens.has(term);for(let index=0;index<=tokenList.length-parts.length;index++){if(parts.every((part,offset)=>tokenList[index+offset]===part))return true;}return false;};
     const matchedTerms=terms.filter(matchesTerm);
-    const score = matchedTerms.reduce((total,term) => total + (term.includes(" ") ? 12 : term.length > 3 ? 4 : 1),0) + Math.min(1,product.stock/50);
+    const score = matchedTerms.reduce((total,term) => total + (term.includes(" ") ? (aiEssentialTerms.has(term)?20:8) : aiEssentialTerms.has(term) ? (term.length>3?7:3) : term.length > 3 ? 4 : 1),0) + Math.min(1,product.stock/50);
     return { product, score, matchedTerms };
   }).sort((a,b) => b.score-a.score || b.product.stock-a.product.stock);
 }
