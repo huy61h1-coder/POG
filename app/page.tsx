@@ -708,14 +708,18 @@ function PogCanvas({file,modal,selected,positions,canUpload,onReanalyze,onUpload
   return <div className="pog-empty-state"><span>POG {modal.line}{modal.side}</span><h3>Chưa có file POG cho mặt kệ này</h3><p>Tải PDF để tự crop, ghép nhiều file, liên kết SKU với stock và khoanh vị trí sản phẩm theo chuẩn Line 16A.</p>{canUpload&&<button onClick={onUpload}>↑ Tải POG PDF</button>}</div>;
 }
 function PogProductDetails({product,file,positions}:{product:Product;file?:PogFile;positions:PogPosition[]}) {
-  const barcode=product.supplierBarcode||product.barcode||"—";
+  // POG-only records can contain the identifiers only on the matched image
+  // position. Keep those values visible even when Master Data is incomplete.
+  const matchedPosition=positions[0];
+  const sku=product.sku||matchedPosition?.sku||"—";
+  const barcode=product.supplierBarcode||product.barcode||matchedPosition?.barcode||"—";
   const line=file?`${file.line}${file.side}`:product.shelfLine?`${product.shelfLine}${product.shelfSide||""}`:"—";
   const division=[product.divisionName,product.division].filter(Boolean).join(" · ")||"—";
   const department=[product.departmentName,product.department].filter(Boolean).join(" · ")||"—";
   const positionNumbers=positions.map((position)=>position.number).join(", ")||"—";
   const fields=[
     ["STT",positionNumbers],
-    ["SKU",product.sku||"—"],
+    ["SKU",sku],
     ["Barcode",barcode],
     ["Department",department],
     ["Division",division],
@@ -723,7 +727,7 @@ function PogProductDetails({product,file,positions}:{product:Product;file?:PogFi
     ["Thất thoát",money.format(product.loss||0)],
     ["Ngày HSD",product.expDate||"Chưa có"]
   ] as const;
-  return <section className="pog-product-details" aria-live="polite"><header><div><p>SẢN PHẨM ĐANG CHỌN</p><h3>{product.name||"Sản phẩm"}</h3></div><StockBadge stock={product.stock}/></header><dl><div className="pog-detail-stock"><dt>Tồn kho</dt><dd>{money.format(product.stock||0)}</dd></div>{fields.map(([label,value])=><div key={label}><dt>{label}</dt><dd title={value}>{value}</dd></div>)}</dl></section>;
+  return <section className="pog-product-details" aria-live="polite"><header><div><p>SẢN PHẨM ĐANG CHỌN</p><h3>{product.name||matchedPosition?.name||"Sản phẩm"}</h3></div><StockBadge stock={product.stock}/></header><dl><div className="pog-detail-stock"><dt>Tồn kho</dt><dd>{money.format(product.stock||0)}</dd></div>{fields.map(([label,value])=><div key={label}><dt>{label}</dt><dd title={value}><span>{value}</span></dd></div>)}</dl></section>;
 }
 function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload,uploadRef,onUpload,onAppend,onReanalyze,onPageChange,onPick,onClose}:{modal:{line:string;side:"A"|"B";selectedId?:string};setModal:(v:{line:string;side:"A"|"B";selectedId?:string})=>void;products:Product[];total:number;file?:PogFile;search:string;setSearch:(v:string)=>void;canUpload:boolean;uploadRef:React.RefObject<HTMLInputElement|null>;onUpload:(f?:File)=>void;onAppend:(f?:File)=>void;onReanalyze:()=>void;onPageChange:(page:number)=>void;onPick:(p:Product)=>void;onClose:()=>void}) {
   // Trên mobile, một kết quả tìm kiếm duy nhất được chọn ngay để thông tin
