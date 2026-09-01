@@ -169,11 +169,12 @@ function productSummary(products,stockRecords=[],manualChecks=[]) {
   }
   return {stats,alerts,lines:[...lines].sort((a,b)=>Number(a)-Number(b))};
 }
-const productSearchCache=new WeakMap(),productLookupCache=new WeakMap(),productApiCache=new WeakMap();
+const productSearchCache=new WeakMap(),productLookupCache=new WeakMap(),productApiCache=new WeakMap(),stockApiCache=new WeakMap();
 function getProductSummary(state){return productSummary(state.products,state.stockRecords,state.manualChecks);}
 function productSearchText(product){let value=productSearchCache.get(product);if(!value){value=normalizeText([product.name,product.sku,product.barcode,product.supplierBarcode,product.division,product.divisionName,product.department,product.departmentName,product.line,product.lineName,product.side].join(" "));productSearchCache.set(product,value);}return value;}
 function productLookup(products){let lookup=productLookupCache.get(products);if(!lookup){lookup=new Map();for(const product of products){for(const value of [product.sku,product.barcode,product.supplierBarcode]){const key=normalizeText(value);if(key&&!lookup.has(key))lookup.set(key,product);}}productLookupCache.set(products,lookup);}return lookup;}
 function getProductApiCache(products){let cache=productApiCache.get(products);if(!cache){cache=new Map();productApiCache.set(products,cache);}return cache;}
+function getStockApiCache(records){let cache=stockApiCache.get(records);if(!cache){cache=new Map();stockApiCache.set(records,cache);}return cache;}
 function expiryRank(product){if(!product.expDate)return 0;const value=Date.parse(product.expDate+"T00:00:00");return Number.isFinite(value)?value:Number.MAX_SAFE_INTEGER;}
 function pushExpiryTop(heap,product,limit){
   if(limit<=0)return;const entry={product,rank:expiryRank(product)},later=(a,b)=>a.rank>b.rank||(a.rank===b.rank&&String(a.product.sku)>String(b.product.sku));
@@ -331,8 +332,8 @@ class StateStore {
     return this.localState;
   }
   async save(state) {
-    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products); }
-    else { try{await writeLocalState(state);this.localState=state;productApiCache.delete(state.products);}catch(error){this.localState=null;throw error;} }
+    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products);stockApiCache.delete(state.stockRecords); }
+    else { try{await writeLocalState(state);this.localState=state;productApiCache.delete(state.products);stockApiCache.delete(state.stockRecords);}catch(error){this.localState=null;throw error;} }
   }
   async mutate(callback) {
     const run = async () => {
@@ -344,7 +345,7 @@ class StateStore {
           const state = ensureStateShape(result.rows[0].state);
           const value = await callback(state);
           await client.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
-          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products);
+          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products);stockApiCache.delete(state.stockRecords);
           return value;
         } catch (error) {
           await client.query("ROLLBACK");
@@ -668,9 +669,10 @@ app.get("/api/products", async(req,res,next)=>{
 app.get("/api/stock", async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const query=normalizeText(asText(req.query.q).slice(0,200)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize,bySku=stockIndex(state.stockRecords),productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
+    const query=normalizeText(asText(req.query.q).slice(0,200)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize,cacheKey=[query,page,pageSize,asInt(state.stockImport?.updatedAt,0)].join("|"),apiCache=getStockApiCache(state.stockRecords),cached=apiCache.get(cacheKey);if(cached)return res.set("Cache-Control","no-store").json(cached);
+    const bySku=stockIndex(state.stockRecords),productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
     const rows=[];for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku)),row={...(product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),stock:record.stock,stockKnown:true,updatedAt:record.updatedAt};if(!query||productSearchText(row).includes(query))rows.push(row);}
-    rows.sort((a,b)=>a.sku.localeCompare(b.sku));res.set("Cache-Control","no-store").json({products:rows.slice(start,start+pageSize),total:rows.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!productsBySku.has(normalizeText(row.sku))).length});
+    rows.sort((a,b)=>a.sku.localeCompare(b.sku));const payload={products:rows.slice(start,start+pageSize),total:rows.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!productsBySku.has(normalizeText(row.sku))).length};if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);res.set("Cache-Control","no-store").json(payload);
   } catch(error){next(error);}
 });
 

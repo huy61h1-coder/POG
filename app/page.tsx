@@ -282,10 +282,13 @@ export default function Home() {
   const pogRef = useRef<HTMLInputElement>(null);
   const pogAutoAnalysisRef = useRef(new Set<string>());
   const searchCacheRef = useRef(new Map<string,ProductPage>());
+  const productViewCacheRef = useRef(new Map<string,ProductPage>());
+  const clearProductCaches=useCallback(()=>{searchCacheRef.current.clear();productViewCacheRef.current.clear();},[]);
   const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
-  const pogLocationFor=(product:Pick<Product,"sku"|"barcode"|"supplierBarcode">)=>pogLocationIndex.get(normalize(product.sku))||pogLocationIndex.get(normalize(product.barcode))||pogLocationIndex.get(normalize(product.supplierBarcode));
-  const withPogLocation=(product:Product):Product=>{const location=pogLocationFor(product);return {...product,shelfLine:location?.line||"",shelfSide:location?.side||"",shelfPosition:location?.position.number||0};};
+  const pogLocationFor=useCallback((product:Pick<Product,"sku"|"barcode"|"supplierBarcode">)=>pogLocationIndex.get(normalize(product.sku))||pogLocationIndex.get(normalize(product.barcode))||pogLocationIndex.get(normalize(product.supplierBarcode)),[pogLocationIndex]);
+  const withPogLocation=useCallback((product:Product):Product=>{const location=pogLocationFor(product);return {...product,shelfLine:location?.line||"",shelfSide:location?.side||"",shelfPosition:location?.position.number||0};},[pogLocationFor]);
   const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
+  const productSource=tab==="CHECK_STOCK"?"stock":"master",effectiveStock=tab==="MAP"?"all":stockFilter,productSort=tab==="DATE"?"expiry":"",normalizedProductQuery=normalize(query.trim());
 
   const loadData = useCallback(async (quiet=false) => {
     if (!quiet) setBusy(true);
@@ -311,24 +314,26 @@ export default function Home() {
   useEffect(()=>{
     if(!actorUserId)return;
     if(query.trim().length===1)return;
-    const requestKey=[tab,query.trim(),stockFilter,productPage,productRefresh].join("|");
+    const requestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productRefresh].join("|");
+    const cachedView=productViewCacheRef.current.get(requestKey);if(cachedView){setProductResult({...cachedView,products:cachedView.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
       setProductsBusy(true);
       try {
-        const params=new URLSearchParams({page:String(productPage),pageSize:"100",stock:tab==="MAP"?"all":stockFilter});
-        if(query.trim())params.set("q",query.trim());if(tab==="DATE")params.set("sort","expiry");
-        const endpoint=(tab==="CHECK_STOCK"?"/api/stock?":"/api/products?")+params,cacheKey=endpoint;
-        const cached=searchCacheRef.current.get(cacheKey);if(cached){setProductResult({...cached,products:cached.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
+        const params=new URLSearchParams({page:String(productPage),pageSize:"100",stock:effectiveStock});
+        if(normalizedProductQuery)params.set("q",normalizedProductQuery);if(productSort)params.set("sort",productSort);
+        const endpoint=(productSource==="stock"?"/api/stock?":"/api/products?")+params,cacheKey=endpoint;
+        const cached=searchCacheRef.current.get(cacheKey);if(cached){productViewCacheRef.current.set(requestKey,cached);setProductResult({...cached,products:cached.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
         const response=await fetch(endpoint,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage&{error?:string};
         if(!response.ok)throw new Error(payload.error||"Không thể tải danh sách sản phẩm");
         if(searchCacheRef.current.size>80)searchCacheRef.current.delete(searchCacheRef.current.keys().next().value as string);searchCacheRef.current.set(cacheKey,payload);
+        if(productViewCacheRef.current.size>100)productViewCacheRef.current.delete(productViewCacheRef.current.keys().next().value as string);productViewCacheRef.current.set(requestKey,payload);
         setProductResult({...payload,products:payload.products.map(withPogLocation)});setProductResultKey(requestKey);
         const lastPage=Math.max(1,Math.ceil(payload.total/payload.pageSize));if(productPage>lastPage)setProductPage(lastPage);
       } catch(cause){if(!controller.signal.aborted)setToast(cause instanceof Error?cause.message:"Không thể tải danh sách sản phẩm");}
       finally{if(!controller.signal.aborted)setProductsBusy(false);}
-    },query.trim()?260:0);
+    },normalizedProductQuery?80:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
-  },[actorUserId,query,stockFilter,productPage,productRefresh,tab,pogLocationIndex]);
+  },[actorUserId,query,normalizedProductQuery,effectiveStock,productPage,productRefresh,productSource,productSort,withPogLocation]);
   useEffect(()=>{
     if(!actorUserId||!pogLine||!pogSide)return;
     const requestKey=[actorUserId,pogLine,pogSide,pogSearch.trim(),productRefresh,activePogUpdated].join("|");
@@ -337,7 +342,7 @@ export default function Home() {
       try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage;if(response.ok){setPogProducts(payload.products.map(withPogLocation));setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
     },pogSearch.trim()?180:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
-  },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogFile?.id,pogLocationIndex]);
+  },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogFile?.id,withPogLocation]);
   useEffect(()=>{
     const jobId=importJob?.jobId;if(!actorUserId||!jobId||importJob.status==="uploading"||["completed","failed"].includes(importJob.status))return;
     let stopped=false,timer=0,failures=0;
@@ -348,18 +353,18 @@ export default function Home() {
         if(!response.ok){const cause=new Error(payload.error||"Không thể theo dõi tiến độ nhập dữ liệu") as Error&{terminal?:boolean};cause.terminal=[403,404].includes(response.status);throw cause;}
         failures=0;
         if(stopped)return;setImportJob(payload);
-        if(payload.status==="completed"&&payload.result){setMasterImport(payload.result);window.localStorage.removeItem(importStorageKey);setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã nhập "+payload.result.imported+" SKU · "+payload.result.created+" mới · "+payload.result.updated+" cập nhật");return;}
+        if(payload.status==="completed"&&payload.result){setMasterImport(payload.result);window.localStorage.removeItem(importStorageKey);clearProductCaches();setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã nhập "+payload.result.imported+" SKU · "+payload.result.created+" mới · "+payload.result.updated+" cập nhật");return;}
         if(payload.status==="failed"){window.localStorage.removeItem(importStorageKey);setToast(payload.error||"Không thể nhập Master Data");return;}
         timer=window.setTimeout(()=>void poll(),900);
       }catch(cause){if(!stopped){const error=cause as Error&{terminal?:boolean};if(error.terminal){setImportJob((current)=>current?{...current,status:"failed",phase:"Không thể tiếp tục",error:error.message}:current);window.localStorage.removeItem(importStorageKey);return;}failures++;setImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:error.message}:current);timer=window.setTimeout(()=>void poll(),Math.min(10000,900*2**Math.min(4,failures)));}}
     };
     void poll();return()=>{stopped=true;window.clearTimeout(timer);};
-  },[actorUserId,importJob?.jobId,importJob?.status,importStorageKey,loadData]);
+  },[actorUserId,clearProductCaches,importJob?.jobId,importJob?.status,importStorageKey,loadData]);
   useEffect(()=>{
     const jobId=stockImportJob?.jobId;if(!actorUserId||!jobId||stockImportJob.status==="uploading"||["completed","failed"].includes(stockImportJob.status))return;
     let stopped=false,timer=0;
-    const poll=async()=>{try{const response=await fetch("/api/stock/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await response.json() as StockImportJob&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể theo dõi file Stock");if(stopped)return;setStockImportJob(payload);if(payload.status==="completed"){setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã cập nhật tồn kho từ "+(payload.result?.imported||0)+" SKU");return;}if(payload.status==="failed"){setToast(payload.error||"Không thể nhập file Stock");return;}timer=window.setTimeout(()=>void poll(),900);}catch(cause){if(!stopped){setStockImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:cause instanceof Error?cause.message:""}:current);timer=window.setTimeout(()=>void poll(),3000);}}};void poll();return()=>{stopped=true;window.clearTimeout(timer);};
-  },[actorUserId,stockImportJob?.jobId,stockImportJob?.status,loadData]);
+    const poll=async()=>{try{const response=await fetch("/api/stock/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await response.json() as StockImportJob&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể theo dõi file Stock");if(stopped)return;setStockImportJob(payload);if(payload.status==="completed"){clearProductCaches();setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã cập nhật tồn kho từ "+(payload.result?.imported||0)+" SKU");return;}if(payload.status==="failed"){setToast(payload.error||"Không thể nhập file Stock");return;}timer=window.setTimeout(()=>void poll(),900);}catch(cause){if(!stopped){setStockImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:cause instanceof Error?cause.message:""}:current);timer=window.setTimeout(()=>void poll(),3000);}}};void poll();return()=>{stopped=true;window.clearTimeout(timer);};
+  },[actorUserId,clearProductCaches,stockImportJob?.jobId,stockImportJob?.status,loadData]);
 
   const mutate = async (action:string, payload:Record<string,unknown>={}) => {
     setBusy(true);
@@ -368,7 +373,7 @@ export default function Home() {
       const result = await response.json() as {error?:string;setupRequired?:boolean};
       if(response.status===401){setData(null);setAuthMode(result.setupRequired?"setup":"login");throw new Error("Phiên đăng nhập đã hết hạn");}
       if (!response.ok) throw new Error(result.error || "Thao tác thất bại");
-      await loadData(true);setProductRefresh((value)=>value+1);setToast("Đã cập nhật thành công");
+      await loadData(true);clearProductCaches();setProductRefresh((value)=>value+1);setToast("Đã cập nhật thành công");
       return true;
     } catch (cause) { setToast(cause instanceof Error ? cause.message : "Thao tác thất bại"); return false; }
     finally { setBusy(false); }
@@ -392,7 +397,7 @@ export default function Home() {
     try{await fetch("/api/auth/logout",{method:"POST"});}finally{setSettingsOpen(false);setImportJob(null);setLoginOpen(false);setAuthMode(null);await loadData(true);setBusy(false);}
   };
 
-  const productRequestKey=[tab,query.trim(),stockFilter,productPage,productRefresh].join("|"),productsCurrent=productResultKey===productRequestKey;
+  const productRequestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productRefresh].join("|"),productsCurrent=productResultKey===productRequestKey;
   const products=productsCurrent?productResult.products:[],productsLoading=productsBusy||!productsCurrent;
   const searchMatches = query.length >= 2 ? products.slice(0,8) : [];
   const pickedCount = (data?.picking||[]).filter((p)=>Boolean(p.picked)).length;
