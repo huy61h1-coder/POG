@@ -258,7 +258,9 @@ function takeAiQuota(userId) {
 async function openAiProductSuggestions(query, products) {
   const apiKey=asText(process.env.OPENAI_API_KEY);
   if(!apiKey)return localProductSuggestions(query,products,"Chưa cấu hình khóa AI; ứng dụng đang dùng bộ phân tích nội bộ.");
-  const model=asText(process.env.OPENAI_MODEL,"gpt-5.4-mini");
+  // Keep the default on a public OpenAI API model. `gpt-5.4-mini` is a
+  // Codex-host model name and is not necessarily available to API keys.
+  const model=asText(process.env.OPENAI_MODEL,"gpt-5-mini");
   const baseUrl=asText(process.env.OPENAI_BASE_URL,"https://api.openai.com/v1").replace(/\/+$/,"");
   const catalogLimit=Math.max(50,Math.min(2000,asInt(process.env.AI_PRODUCT_LIMIT,1200)));
   const catalog=rankedProducts(query,products).slice(0,catalogLimit).map(({product}) => ({
@@ -301,7 +303,7 @@ async function openAiProductSuggestions(query, products) {
         }}
       })
     });
-    if(!response.ok)throw new Error("OpenAI status "+response.status);
+    if(!response.ok){const error=new Error("OpenAI status "+response.status);error.status=response.status;throw error;}
     const payload=await response.json();
     const outputText=asText(payload.output_text)||asText(payload.output?.flatMap((item)=>item.content||[]).find((item)=>item.type==="output_text")?.text);
     if(!outputText)throw new Error("OpenAI returned no output text");
@@ -315,8 +317,20 @@ async function openAiProductSuggestions(query, products) {
     if(!items.length)return localProductSuggestions(query,products,"AI chưa tìm được kết quả hợp lệ; đã chuyển sang phân tích nội bộ.");
     return {mode:"ai",model,summary:asText(parsed.summary,"Đã tìm thấy "+items.length+" sản phẩm phù hợp.").slice(0,300),notice:`Đã rà soát ${products.length.toLocaleString("vi-VN")} SKU còn tồn từ Master Data và Stock.`,items};
   } catch(error) {
-    console.error("AI suggestion fallback:",error instanceof Error?error.message:"unknown error");
-    return localProductSuggestions(query,products,"AI tạm thời chưa phản hồi; kết quả dưới đây được phân tích nội bộ.");
+    const status=Number(error?.status)||0;
+    const reason=status===401||status===403
+      ? "API key không hợp lệ hoặc chưa có quyền truy cập model"
+      : status===404
+        ? "model không tồn tại hoặc không khả dụng cho API key"
+        : status===429
+          ? "tài khoản đã hết hạn mức hoặc đang vượt giới hạn gọi"
+          : status>=500
+            ? "OpenAI đang tạm thời gặp lỗi máy chủ"
+            : error?.name==="AbortError"
+              ? "quá thời gian chờ kết nối"
+              : "không kết nối được tới OpenAI";
+    console.error("AI suggestion fallback:",status||"network",error instanceof Error?error.message:"unknown error");
+    return localProductSuggestions(query,products,`AI chưa phản hồi: ${reason}; kết quả dưới đây được phân tích nội bộ.`);
   } finally { clearTimeout(timeout); }
 }
 
