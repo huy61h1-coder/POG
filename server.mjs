@@ -43,7 +43,9 @@ function initialState() {
       { id:"p3",sku:"8969583",barcode:"8801260418800",supplierBarcode:"8801260418800",name:"BVS SOONSOOHANMYEON 23CM 18 MIẾNG",division:"10",divisionName:"HEALTH & BEAUTY",department:"1002",departmentName:"FEMININE CARE",line:"16",lineName:"NONFOOD",side:"A",bay:5,price:45000,stock:0,loss:0,expDate:"2027-01-10",updatedAt:now },
     ],
     accounts: [], sessions: [], roles: [], logs: [], picking: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
-    appBrand: { logo:"/aeon-logo.svg", logoSize:220, updatedAt:now },
+    // Keep the legacy logoSize field as a desktop alias for older clients,
+    // while storing independent desktop/mobile sizes for the responsive UI.
+    appBrand: { logo:"/aeon-logo.svg", logoSize:220, logoSizeDesktop:220, logoSizeMobile:120, updatedAt:now },
     lineConfigs: lineDefaults.map(([line,name,color,logo]) => ({ line,name,color,logo,updatedAt:now })),
   };
 }
@@ -85,7 +87,11 @@ function ensureStateShape(source) {
   state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
-  state.appBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?{logo:state.appBrand.logo,logoSize:Math.max(120,Math.min(320,asInt(state.appBrand.logoSize,220))),updatedAt:asInt(state.appBrand.updatedAt,Date.now())}:{logo:"/aeon-logo.svg",logoSize:220,updatedAt:Date.now()};
+  const savedBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?state.appBrand:null;
+  const legacyLogoSize=Math.max(120,Math.min(320,asInt(savedBrand?.logoSize,220)));
+  const logoSizeDesktop=Math.max(120,Math.min(320,asInt(savedBrand?.logoSizeDesktop,legacyLogoSize)));
+  const logoSizeMobile=Math.max(72,Math.min(220,asInt(savedBrand?.logoSizeMobile,Math.round(legacyLogoSize*.55))));
+  state.appBrand=savedBrand?{logo:savedBrand.logo,logoSize:logoSizeDesktop,logoSizeDesktop,logoSizeMobile,updatedAt:asInt(savedBrand.updatedAt,Date.now())}:{logo:"/aeon-logo.svg",logoSize:220,logoSizeDesktop:220,logoSizeMobile:120,updatedAt:Date.now()};
   state.lineConfigs=Array.isArray(state.lineConfigs)&&state.lineConfigs.length?state.lineConfigs:lineDefaults.map(([line,name,color,logo])=>({line,name,color,logo,updatedAt:Date.now()}));
   return state;
 }
@@ -773,7 +779,20 @@ app.post("/api/store", async (req, res, next) => {
       if(action==="clearPick"){state.picking=state.picking.filter((p)=>p.userId!==actor.userId);audit(state,actor,"Hoàn tất và làm trống đơn soạn");return {ok:true};}
       if(action==="updateLineConfig"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const source=body.lineConfig||{},line=cleanLine(source.line),name=asText(source.name).slice(0,48),color=asText(source.color).toUpperCase(),logo=asText(source.logo).slice(0,36);if(!name)return fail("Tên Line là bắt buộc");if(!/^#[0-9A-F]{6}$/.test(color))return fail("Màu cần theo định dạng #RRGGBB");const config={line,name,color,logo,updatedAt:Date.now()},index=state.lineConfigs.findIndex((item)=>item.line===line);if(index>=0)state.lineConfigs[index]=config;else state.lineConfigs.push(config);audit(state,actor,"Cập nhật layout Line "+line+": "+name);return {ok:true};}
       if(action==="updatePogPage"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const line=cleanLine(body.line),side=asText(body.side,"A")==="B"?"B":"A",record=state.pogFiles.find((item)=>item.id===line+"_"+side);if(!record)return fail("Chưa có file POG cho mặt kệ này",404);record.page=Math.max(1,Math.min(99,asInt(body.page,1)));record.updatedAt=Date.now();audit(state,actor,"Đổi trang POG Line "+line+" mặt "+side);return {ok:true};}
-      if(action==="updateAppBrand"){if(actor.role!=="ADMIN")return fail("Chỉ Admin được thay đổi logo ứng dụng",403);const logo=asText(body.logo)||state.appBrand?.logo||"/aeon-logo.svg",logoSize=Math.max(120,Math.min(320,asInt(body.logoSize,state.appBrand?.logoSize||220)));if(logo!=="/aeon-logo.svg"&&(!/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(logo)||logo.length>1_500_000))return fail("Logo cần là PNG, JPG, WEBP hoặc SVG, dung lượng tối đa 1 MB");state.appBrand={logo,logoSize,updatedAt:Date.now()};audit(state,actor,"Cập nhật logo ứng dụng");return {ok:true};}
+      if(action==="updateAppBrand"){
+        if(actor.role!=="ADMIN")return fail("Chỉ Admin được thay đổi logo ứng dụng",403);
+        const current=state.appBrand||{logo:"/aeon-logo.svg",logoSize:220,logoSizeDesktop:220,logoSizeMobile:120};
+        const logo=asText(body.logo)||current.logo||"/aeon-logo.svg";
+        const desktopInput=body.logoSizeDesktop===undefined?body.logoSize:body.logoSizeDesktop;
+        const desktopFallback=current.logoSizeDesktop||current.logoSize||220;
+        const mobileFallback=current.logoSizeMobile||Math.round(desktopFallback*.55);
+        const logoSizeDesktop=Math.max(120,Math.min(320,asInt(desktopInput,desktopFallback)));
+        const logoSizeMobile=Math.max(72,Math.min(220,asInt(body.logoSizeMobile,mobileFallback)));
+        if(logo!=="/aeon-logo.svg"&&(!/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(logo)||logo.length>1_500_000))return fail("Logo cần là PNG, JPG, WEBP hoặc SVG, dung lượng tối đa 1 MB");
+        state.appBrand={logo,logoSize:logoSizeDesktop,logoSizeDesktop,logoSizeMobile,updatedAt:Date.now()};
+        audit(state,actor,"Cập nhật logo ứng dụng");
+        return {ok:true};
+      }
       return fail("Thao tác không hợp lệ");
     });
     res.status(result.status||200).json(result);
