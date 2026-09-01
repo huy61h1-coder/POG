@@ -85,7 +85,8 @@ function ensureStateShape(source) {
   state.picking=Array.isArray(state.picking)?state.picking:[];
   state.pogFiles=Array.isArray(state.pogFiles)?state.pogFiles:[];
   state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
-  state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
+  const validCheckDate=(value)=>/^\d{4}-\d{2}-\d{2}$/.test(asText(value))?asText(value):"";
+  state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>{const withdrawDate=validCheckDate(item.withdrawDate)||validCheckDate(item.expDate);return {productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),inboundDate:validCheckDate(item.inboundDate),withdrawDate,expDate:withdrawDate,updatedAt:asInt(item.updatedAt,Date.now())};}):[];
   state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
   const savedBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?state.appBrand:null;
   const legacyLogoSize=Math.max(50,Math.min(320,asInt(savedBrand?.logoSize,220)));
@@ -154,12 +155,14 @@ function withUploadedStock(product,index) {
 }
 function manualCheckGroups(state) {
   const productsById=new Map(state.products.map((product)=>[product.id,product]));
-  const groups={stock:[],loss:[],expiry:[]};
+  const groups={checkLoss:[],stock:[],loss:[],expiry:[]};
   for(const check of state.manualChecks){
     const product=productsById.get(check.productId);if(!product)continue;
-    if(check.stock!==undefined)groups.stock.push({...product,stock:check.stock,stockKnown:true,updatedAt:check.updatedAt});
-    if(check.loss!==undefined)groups.loss.push({...product,loss:check.loss,updatedAt:check.updatedAt});
-    if(check.expDate)groups.expiry.push({...product,expDate:check.expDate,updatedAt:check.updatedAt});
+    const enriched={...product,stock:check.stock??product.stock,stockKnown:check.stock!==undefined||product.stockKnown,loss:check.loss??product.loss,manualStock:check.stock,manualLoss:check.loss,inboundDate:check.inboundDate||"",withdrawDate:check.withdrawDate||check.expDate||"",expDate:check.withdrawDate||check.expDate||"",updatedAt:check.updatedAt};
+    if(check.stock!==undefined||check.loss!==undefined)groups.checkLoss.push(enriched);
+    if(check.stock!==undefined)groups.stock.push(enriched);
+    if(check.loss!==undefined)groups.loss.push(enriched);
+    if(check.inboundDate||check.withdrawDate||check.expDate)groups.expiry.push(enriched);
   }
   return groups;
 }
@@ -168,7 +171,7 @@ function productSummary(products,stockRecords=[],manualChecks=[]) {
   const stats={total:0,outCount:0,lowCount:0,totalLoss:0,expiring:0},alerts=[],lines=new Set();
   const uploaded=stockIndex(stockRecords),manualById=new Map(manualChecks.map((item)=>[item.productId,item]));
   for(const source of products){
-    const product=withUploadedStock(source,uploaded),manual=manualById.get(product.id),loss=Number(manual?.loss)||0,expiryText=asText(manual?.expDate),expiry=expiryText?new Date(expiryText+"T00:00:00").getTime():Infinity;
+    const product=withUploadedStock(source,uploaded),manual=manualById.get(product.id),loss=Number(manual?.loss)||0,expiryText=asText(manual?.withdrawDate)||asText(manual?.expDate),expiry=expiryText?new Date(expiryText+"T00:00:00").getTime():Infinity;
     stats.total++;if(product.stockKnown&&product.stock===0)stats.outCount++;if(product.stockKnown&&product.stock>0&&product.stock<10)stats.lowCount++;stats.totalLoss+=loss;lines.add(product.line);
     if(expiry<=soon)stats.expiring++;
     if(alerts.length<6&&((product.stockKnown&&product.stock<10)||loss>0||expiry<=soon))alerts.push({...product,loss,expDate:expiryText});
@@ -767,8 +770,29 @@ app.post("/api/store", async (req, res, next) => {
         if(actor.userId==="guest")return fail("Vui lòng đăng nhập để chỉnh sửa dữ liệu",401);
         const kind=asText(body.kind),sku=asText(body.sku),product=state.products.find((p)=>normalizeText(p.sku)===normalizeText(sku));if(!product)return fail("SKU không có trong Master Data",404);
         const value=body.value,now=Date.now(),index=state.manualChecks.findIndex((item)=>item.productId===product.id),current=index>=0?state.manualChecks[index]:{productId:product.id};
-        if(kind==="stock")current.stock=Math.max(0,asInt(value));else if(kind==="loss")current.loss=Math.max(0,asInt(value));else if(kind==="expiry"){const date=asText(value);if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return fail("Hạn dùng cần theo định dạng ngày hợp lệ");current.expDate=date;}else return fail("Loại kiểm tra không hợp lệ");
-        current.updatedAt=now;if(index>=0)state.manualChecks[index]=current;else state.manualChecks.push(current);audit(state,actor,"Nhập thủ công "+(kind==="stock"?"kiểm tồn":kind==="loss"?"thất thoát":"hạn dùng")+" SKU "+product.sku);return {ok:true};
+        const isNonNegativeInteger=(input)=>{if(input===null||input===undefined||String(input).trim()==="")return false;const number=Number(input);return Number.isInteger(number)&&number>=0;};
+        const isValidDate=(date)=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return false;const timestamp=Date.parse(date+"T00:00:00Z");return Number.isFinite(timestamp)&&new Date(timestamp).toISOString().slice(0,10)===date;};
+        if(kind==="checkLoss"){
+          if(!isNonNegativeInteger(body.stock))return fail("Tồn thực tế phải là số nguyên không âm");
+          if(body.loss!==undefined&&!isNonNegativeInteger(body.loss))return fail("Thất thoát phải là số nguyên không âm");
+          current.stock=asInt(body.stock);current.loss=body.loss===undefined?Math.max(0,asInt(current.loss)):asInt(body.loss);
+        } else if(kind==="stock"){
+          if(!isNonNegativeInteger(value))return fail("Tồn kiểm đếm phải là số nguyên không âm");
+          current.stock=asInt(value);
+        } else if(kind==="loss"){
+          if(!isNonNegativeInteger(value))return fail("Thất thoát phải là số nguyên không âm");
+          current.loss=asInt(value);
+        } else if(kind==="checkDate"){
+          const inboundDate=asText(body.inboundDate),withdrawDate=asText(body.withdrawDate);
+          if(!isValidDate(inboundDate)||!isValidDate(withdrawDate))return fail("Vui lòng chọn ngày nhập hàng và hạn rút hàng");
+          if(withdrawDate<inboundDate)return fail("Hạn rút hàng không thể trước ngày nhập hàng");
+          current.inboundDate=inboundDate;current.withdrawDate=withdrawDate;current.expDate=withdrawDate;
+        } else if(kind==="expiry"){
+          const date=asText(value);if(!isValidDate(date))return fail("Hạn dùng cần theo định dạng ngày hợp lệ");current.withdrawDate=date;current.expDate=date;
+        } else return fail("Loại kiểm tra không hợp lệ");
+        current.updatedAt=now;if(index>=0)state.manualChecks[index]=current;else state.manualChecks.push(current);
+        const auditLabel=kind==="checkLoss"?"Check Loss":kind==="checkDate"?"Check Date":kind==="stock"?"kiểm tồn":kind==="loss"?"thất thoát":"hạn dùng";
+        audit(state,actor,"Nhập "+auditLabel+" SKU "+product.sku);return {ok:true};
       }
       if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1))),product=state.products.find((p)=>p.id===productId),record=product&&stockIndex(state.stockRecords).get(normalizeText(product.sku));if(!product)return fail("Không tìm thấy sản phẩm",404);if(!record)return fail("Chưa có dữ liệu tồn kho từ file Stock cho sản phẩm này",409);if(record.stock<=0)return fail("Sản phẩm đang hết hàng",409);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;}else state.picking.push({userId:actor.userId,productId,quantity,picked:false,createdAt:Date.now()});audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
       if(action==="assignPick"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const productId=asText(body.productId),assigneeId=asText(body.assigneeId),quantity=Math.max(1,Math.min(999,asInt(body.quantity,1))),customerName=asText(body.customerName).slice(0,100),note=asText(body.note).slice(0,500),product=state.products.find((p)=>p.id===productId),assignee=state.accounts.find((account)=>account.id===assigneeId&&account.active!==false),record=product&&stockIndex(state.stockRecords).get(normalizeText(product.sku));if(!product)return fail("Không tìm thấy sản phẩm",404);if(!assignee)return fail("Không tìm thấy nhân viên nhận đơn",404);if(!record||record.stock<=0)return fail("Sản phẩm không có tồn kho từ file Stock",409);if(quantity>record.stock)return fail("Số lượng giao vượt tồn kho hiện có ("+record.stock+")",400);if(!customerName)return fail("Tên khách hàng là bắt buộc");state.picking.push({id:randomUUID(),userId:assigneeId,productId,quantity,picked:false,customerName,note,assignedBy:actor.name,createdAt:Date.now()});audit(state,actor,"Gán SKU "+product.sku+" cho "+assignee.name+" · khách "+customerName);return {ok:true};}

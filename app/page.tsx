@@ -8,8 +8,9 @@ import * as pdfjs from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 type Role = "ADMIN" | "MANAGER" | "STAFF";
-type Tab = "DASHBOARD" | "MAP" | "PRODUCTS" | "CHECK_STOCK" | "STOCK" | "LOSS" | "DATE" | "ORDER" | "SUGGEST";
-type Product = { id:string; sku:string; name:string; division:string; divisionName:string; department:string; departmentName:string; supplierBarcode:string; barcode:string; imageUrl?:string; line:string; lineName:string; side:"A"|"B"; bay:number; shelfLine?:string; shelfSide?:string; shelfPosition?:number; price:number; stock:number; sales?:number; stockKnown?:boolean; loss:number; expDate:string; updatedAt?:number };
+type Tab = "DASHBOARD" | "MAP" | "PRODUCTS" | "CHECK_STOCK" | "CHECK_LOSS" | "DATE" | "ORDER" | "SUGGEST";
+type Product = { id:string; sku:string; name:string; division:string; divisionName:string; department:string; departmentName:string; supplierBarcode:string; barcode:string; imageUrl?:string; line:string; lineName:string; side:"A"|"B"; bay:number; shelfLine?:string; shelfSide?:string; shelfPosition?:number; price:number; stock:number; sales?:number; stockKnown?:boolean; loss:number; expDate:string; manualStock?:number; manualLoss?:number; inboundDate?:string; withdrawDate?:string; updatedAt?:number };
+type ManualCheckKind = "checkLoss" | "checkDate";
 type PickItem = Product & { pickId:string; quantity:number; picked:boolean|number; available?:boolean; customerName:string; note:string; assignedBy:string };
 type AssignedPickItem = PickItem & { assigneeId:string; assigneeName:string };
 type Actor = { userId:string; username:string; email:string; name:string; role:Role; active:boolean };
@@ -25,7 +26,7 @@ type MasterImportResult = { fileName:string; created:number; updated:number; unc
 type MasterImportJob = { jobId:string; status:"uploading"|"queued"|"processing"|"completed"|"failed"; phase:string; percent:number; processedRows:number; totalRows:number; fileName:string; result:MasterImportResult|null; error:string; updatedAt?:number };
 type StockImportJob = Omit<MasterImportJob,"result"> & {result:{fileName:string;imported:number;skipped:number;duplicates:number;issues:Array<{row:number;reason:string}>}|null};
 type ProductStats = { total:number; outCount:number; lowCount:number; totalLoss:number; expiring:number };
-type StoreData = { actor:Actor; products:Product[]; productTotal:number; productStats:ProductStats; alertProducts:Product[]; availableLines:string[]; logs:Audit[]; picking:PickItem[]; assignedPicking:AssignedPickItem[]; users:UserRole[]; pogFiles:PogFile[]; lineConfigs?:LineConfig[]; appBrand?:{logo:string;logoSize:number;logoSizeDesktop?:number;logoSizeMobile?:number;updatedAt:number}; manualChecks:{stock:Product[];loss:Product[];expiry:Product[]}; stockImport?:{fileName:string;updatedAt:number;recordCount:number;skipped:number}|null };
+type StoreData = { actor:Actor; products:Product[]; productTotal:number; productStats:ProductStats; alertProducts:Product[]; availableLines:string[]; logs:Audit[]; picking:PickItem[]; assignedPicking:AssignedPickItem[]; users:UserRole[]; pogFiles:PogFile[]; lineConfigs?:LineConfig[]; appBrand?:{logo:string;logoSize:number;logoSizeDesktop?:number;logoSizeMobile?:number;updatedAt:number}; manualChecks:{checkLoss?:Product[];stock?:Product[];loss?:Product[];expiry:Product[]}; stockImport?:{fileName:string;updatedAt:number;recordCount:number;skipped:number}|null };
 type ProductPage = { products:Product[]; total:number; page:number; pageSize:number; matchedLines?:string[] };
 
 const aisleNames: Record<string,string> = {
@@ -36,7 +37,7 @@ const aisleNames: Record<string,string> = {
 };
 const menu: Array<{id:Tab;label:string}> = [
   {id:"DASHBOARD",label:"Tổng quan"},{id:"MAP",label:"Sơ đồ POG"},{id:"PRODUCTS",label:"Sản phẩm"},
-  {id:"CHECK_STOCK",label:"Check Stock"},{id:"STOCK",label:"Kiểm tồn"},{id:"LOSS",label:"Thất thoát"},{id:"DATE",label:"Hạn dùng"},
+  {id:"CHECK_STOCK",label:"Check Stock"},{id:"CHECK_LOSS",label:"Check Loss"},{id:"DATE",label:"Check Date"},
   {id:"ORDER",label:"Đơn soạn"},{id:"SUGGEST",label:"Gợi ý"}
 ];
 function AppIcon({name}:{name:Tab}) {
@@ -45,8 +46,7 @@ function AppIcon({name}:{name:Tab}) {
     MAP:<><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3Z"/><path d="M9 3v15M15 6v15"/></>,
     PRODUCTS:<><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></>,
     CHECK_STOCK:<><path d="M5 3h14v18H5z"/><path d="M8 7h8M8 11h5M8 15h3"/><path d="m14 16 1.5 1.5L19 14"/></>,
-    STOCK:<><path d="M4 5h16v14H4z"/><path d="M4 9h16M9 9v10"/><path d="M13 14h4"/></>,
-    LOSS:<><path d="M12 3 2.8 20h18.4Z"/><path d="M12 9v5M12 17h.01"/></>,
+    CHECK_LOSS:<><path d="M12 3 2.8 20h18.4Z"/><path d="M12 9v5M12 17h.01"/><path d="M7 6.5h10"/></>,
     DATE:<><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15 2 2 4-4"/></>,
     ORDER:<><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h3"/><path d="m15 16 1.5 1.5L20 13"/></>,
     SUGGEST:<><path d="M9 18h6M10 22h4"/><path d="M8.2 15.2A7 7 0 1 1 15.8 15.2c-1.1.8-1.8 1.6-1.8 2.8h-4c0-1.2-.7-2-1.8-2.8Z"/><path d="M12 2V0M4 5 2.5 3.5M20 5l1.5-1.5"/></>
@@ -279,6 +279,7 @@ export default function Home() {
   const [toast,setToast] = useState("");
   const [productModal,setProductModal] = useState<Product|null>(null);
   const [assignmentProduct,setAssignmentProduct] = useState<Product|null>(null);
+  const [manualCheckModal,setManualCheckModal] = useState<ManualCheckKind|null>(null);
   const [settingsOpen,setSettingsOpen] = useState(false);
   const [lineModal,setLineModal] = useState<LineConfig|null>(null);
   const [pogModal,setPogModal] = useState<{line:string;side:"A"|"B";selectedId?:string}|null>(null);
@@ -430,6 +431,14 @@ export default function Home() {
   const visiblePogProducts=pogCurrent?pogProducts:[],visiblePogTotal=pogCurrent?pogTotal:0;
   const importActive=Boolean(importJob&&["uploading","queued","processing"].includes(importJob.status));
   const totalPages=Math.max(1,Math.ceil(productResult.total/productResult.pageSize));
+  const manualCheckLossProducts=useMemo(()=>{
+    const current=data.manualChecks.checkLoss||[];
+    if(current.length)return current;
+    const merged=new Map<string,Product>();
+    for(const product of data.manualChecks.stock||[])merged.set(product.id,{...product,manualStock:product.stock});
+    for(const product of data.manualChecks.loss||[])merged.set(product.id,{...(merged.get(product.id)||product),manualLoss:product.loss});
+    return [...merged.values()];
+  },[data.manualChecks.checkLoss,data.manualChecks.stock,data.manualChecks.loss]);
 
   const exportCsv = () => {
     const link=document.createElement("a");link.href="/api/master-data/export.csv";link.download="MasterData_Fulfillment.csv";document.body.appendChild(link);link.click();link.remove();
@@ -457,10 +466,16 @@ export default function Home() {
     setStockImportJob({jobId:"",status:"uploading",phase:"Đang tải file Stock",percent:5,processedRows:0,totalRows:0,fileName:file.name,result:null,error:""});
     try{const form=new FormData();form.set("file",file);const response=await fetch("/api/stock/import",{method:"POST",body:form}),payload=await response.json() as StockImportJob&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể nhập file Stock");setStockImportJob(payload);}catch(cause){setStockImportJob(null);setToast(cause instanceof Error?cause.message:"Không thể nhập file Stock");}finally{if(stockExcelRef.current)stockExcelRef.current.value="";}
   };
-  const addManualCheck=(kind:"stock"|"loss"|"expiry")=>{
-    const sku=window.prompt("Nhập SKU trong Master Data:");if(!sku?.trim())return;
-    const label=kind==="stock"?"Số lượng kiểm đếm":kind==="loss"?"Số lượng thất thoát":"Hạn sử dụng (YYYY-MM-DD)";
-    const value=window.prompt(label);if(value===null||!value.trim())return;void mutate("setManualCheck",{kind,sku,value});
+  const addManualCheck=(kind:ManualCheckKind)=>setManualCheckModal(kind);
+  const searchManualProducts=async(search:string):Promise<Product[]>=>{
+    const params=new URLSearchParams({page:"1",pageSize:"50"});if(search.trim())params.set("q",search.trim());
+    const response=await fetch("/api/products?"+params,{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};
+    if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");
+    const lossById=new Map((manualCheckLossProducts||[]).map((item)=>[item.id,item])),dateById=new Map((data.manualChecks.expiry||[]).map((item)=>[item.id,item]));
+    return payload.products.map((product)=>{const lossCheck=lossById.get(product.id),dateCheck=dateById.get(product.id);return withPogLocation({...product,manualStock:lossCheck?.manualStock??(lossCheck?.stockKnown?lossCheck.stock:undefined),manualLoss:lossCheck?.manualLoss??(lossCheck?.loss||undefined),inboundDate:dateCheck?.inboundDate,withdrawDate:dateCheck?.withdrawDate||dateCheck?.expDate,expDate:dateCheck?.withdrawDate||dateCheck?.expDate||product.expDate});});
+  };
+  const saveManualCheck=async(payload:Record<string,unknown>)=>{
+    if(await mutate("setManualCheck",payload))setManualCheckModal(null);
   };
 
   const openProductOnMap = (product:Product,keepQuery=false) => { const location=pogLocationFor(product);if(!location){setToast("SKU này chưa được gán vị trí kệ từ POG.");return;}setPogModal({line:location.line,side:location.side,selectedId:product.id});setPogSearch(product.sku);if(!keepQuery)setQuery("");setProductPage(1); };
@@ -534,21 +549,21 @@ export default function Home() {
           }
           {tab==="PRODUCTS"&&<ProductsView products={products} total={productResult.total} role={data.actor.role} importResult={masterImport} importJob={importJob} onAdd={()=>setProductModal({...emptyProduct})} onEdit={(p)=>setProductModal({...p})} onDelete={(p)=>void mutate("deleteProduct",{id:p.id})} onMap={openProductOnMap} onPick={(p)=>void mutate("addPick",{productId:p.id})} onExport={exportCsv} onImport={()=>excelRef.current?.click()}/>}
           {tab==="CHECK_STOCK"&&<StockCheckView products={products} total={productResult.total} role={data.actor.role} metadata={data.stockImport} job={stockImportJob} onImport={()=>stockExcelRef.current?.click()} onExport={()=>{const link=document.createElement("a");link.href="/api/stock/export.csv";link.click();}} onAssign={(product)=>setAssignmentProduct(product)}/>} 
-          {tab==="STOCK"&&<ManualCheckGrid kind="stock" products={data.manualChecks.stock.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("stock")}/>}
-          {tab==="LOSS"&&<ManualCheckGrid kind="loss" products={data.manualChecks.loss.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("loss")}/>}
-          {tab==="DATE"&&<ManualCheckGrid kind="expiry" products={data.manualChecks.expiry.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("expiry")}/>}
+          {tab==="CHECK_LOSS"&&<ManualCheckGrid kind="checkLoss" products={manualCheckLossProducts.map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("checkLoss")}/>}
+          {tab==="DATE"&&<ManualCheckGrid kind="checkDate" products={(data.manualChecks.expiry||[]).map(withPogLocation)} canEdit={data.actor.userId!=="guest"} onAdd={()=>addManualCheck("checkDate")}/>}
           {(["PRODUCTS","CHECK_STOCK"] as Tab[]).includes(tab)&&<ProductPager page={productPage} pages={totalPages} total={productResult.total} busy={productsLoading} onPage={setProductPage}/>}
           {tab==="ORDER"&&<OrderView items={data.picking.map(withPogLocation)} assignedItems={data.assignedPicking.map(withPogLocation)} onToggle={(p)=>void mutate("togglePick",{pickId:p.pickId})} onAvailability={(p)=>void mutate("markPickAvailability",{pickId:p.pickId,available:!p.available})} onQuantity={(p,quantity)=>void mutate("updatePickQuantity",{pickId:p.pickId,quantity})} onRemove={(p)=>void mutate("removePick",{pickId:p.pickId})} onClear={()=>void mutate("clearPick")} onMap={openProductOnMap}/>}
           {tab==="SUGGEST"&&<SuggestView value={suggestInput} onValue={setSuggestInput} onGenerate={()=>void generateSuggestions()} result={suggestResult} busy={suggestBusy} error={suggestError} totalProducts={data.productTotal} onMap={(item)=>void openSuggested(item)} onPick={(item)=>void addSuggested(item)}/>}
         </section>
       </div>
 
-      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","CHECK_STOCK","STOCK","LOSS","DATE","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span><AppIcon name={item.id}/></span>{item.label}</button>)}</nav>
+      <nav className="mobile-nav">{menu.filter((item)=>(["DASHBOARD","MAP","PRODUCTS","CHECK_STOCK","CHECK_LOSS","DATE","ORDER","SUGGEST"] as Tab[]).includes(item.id)).map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span><AppIcon name={item.id}/></span>{item.label}</button>)}</nav>
       <input ref={excelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importExcel(e.target.files?.[0])}/>
       <input ref={stockExcelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importStockExcel(e.target.files?.[0])}/>
 
       {productModal&&<ProductModal value={productModal} onChange={setProductModal} onClose={()=>setProductModal(null)} onSave={async()=>{if(await mutate("upsertProduct",{product:productModal}))setProductModal(null);}}/>}
       {assignmentProduct&&<AssignPickModal product={assignmentProduct} users={data.users.filter((user)=>user.active)} customerNames={[...new Set(data.assignedPicking.map((item)=>item.customerName?.trim()).filter(Boolean) as string[])]} onClose={()=>setAssignmentProduct(null)} onAssign={async(assignment)=>{if(await mutate("assignPick",{productId:assignmentProduct.id,...assignment}))setAssignmentProduct(null);}}/>}
+      {manualCheckModal&&<ManualCheckModal kind={manualCheckModal} onSearch={searchManualProducts} onSave={saveManualCheck} onClose={()=>setManualCheckModal(null)}/>}
       {settingsOpen&&<SettingsModal
         actor={data.actor}
         users={data.users}
@@ -613,7 +628,7 @@ function ProductPager({page,pages,total,busy,onPage}:{page:number;pages:number;t
   return <nav className="product-pager" aria-label="Phân trang sản phẩm"><span>{busy?<><i className="mini-spinner"/>Đang tải…</>:<>{money.format(total)} sản phẩm</>}</span><div><button disabled={busy||page<=1} onClick={()=>onPage(page-1)}>← Trước</button><b>Trang {page}/{pages}</b><button disabled={busy||page>=pages} onClick={()=>onPage(page+1)}>Sau →</button></div></nav>;
 }
 function Dashboard({products,totalProducts,logs,totals,onGo}:{products:Product[];totalProducts:number;logs:Audit[];totals:ProductStats;onGo:(tab:Tab)=>void}) {
-  const cards=[["Cạn kho",totals.outCount,"STOCK","!"],["Tồn thấp",totals.lowCount,"STOCK","↓"],["Thất thoát",totals.totalLoss,"LOSS","△"],["HSD cảnh báo",totals.expiring,"DATE","◷"]] as const;
+  const cards=[["Cạn kho",totals.outCount,"CHECK_LOSS","!"],["Tồn thấp",totals.lowCount,"CHECK_LOSS","↓"],["Thất thoát",totals.totalLoss,"CHECK_LOSS","△"],["HSD cảnh báo",totals.expiring,"DATE","◷"]] as const;
   const alerts=products.filter((p)=>p.stock<10||p.loss>0||["warning","danger"].includes(expiryStatus(p.expDate).tone)).slice(0,6);
   return <div><PageHead eyebrow="TRUNG TÂM VẬN HÀNH" title="Tổng quan" subtitle={money.format(totalProducts)+" SKU · Tồn kho, thất thoát và hạn dùng được cập nhật đồng bộ."}/>
     <div className="metric-grid">{cards.map((card)=><button key={card[0]} onClick={()=>onGo(card[2])}><i>{card[3]}</i><span>{card[0]}</span><strong>{card[1]}</strong></button>)}</div>
@@ -661,9 +676,26 @@ function AssignPickModal({product,users,customerNames,onClose,onAssign}:{product
   const [assigneeId,setAssigneeId]=useState(users[0]?.userId||""),[quantity,setQuantity]=useState(1),[customerName,setCustomerName]=useState(""),[note,setNote]=useState("");
   return <div className="modal-backdrop"><section className="form-modal"><div className="modal-head"><div><p>GÁN SOẠN ĐƠN TỪ STOCK</p><h2>Giao sản phẩm cho nhân viên</h2></div><button onClick={onClose}>×</button></div><div className="form-grid"><p className="form-note wide"><b>{product.name}</b><br/>SKU {product.sku} · Tồn hiện có: {money.format(product.stock)}</p><label className="wide">Nhân viên soạn đơn<select value={assigneeId} onChange={(event)=>setAssigneeId(event.target.value)}>{users.map((user)=><option key={user.userId} value={user.userId}>{user.name} · {user.role}</option>)}</select></label><label>Tên khách hàng<input list="assigned-customer-names" value={customerName} onChange={(event)=>setCustomerName(event.target.value)} placeholder="Chọn hoặc nhập tên khách"/><datalist id="assigned-customer-names">{customerNames.map((name)=><option key={name} value={name}/>)}</datalist></label><label>Số lượng<input type="number" min="1" max={product.stock} value={quantity} onChange={(event)=>setQuantity(Math.max(1,Number(event.target.value)||1))}/></label><label className="wide">Ghi chú Stock / đơn hàng<textarea rows={3} value={note} onChange={(event)=>setNote(event.target.value)} placeholder="Ví dụ: Ưu tiên hàng hạn dùng xa, giao buổi chiều…"/></label></div><div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" disabled={!assigneeId||!customerName.trim()||quantity>product.stock} onClick={()=>void onAssign({assigneeId,quantity,customerName:customerName.trim(),note:note.trim()})}>Gán cho nhân viên</button></div></section></div>;
 }
-function ManualCheckGrid({kind,products,canEdit,onAdd}:{kind:"stock"|"loss"|"expiry";products:Product[];canEdit:boolean;onAdd:()=>void}) {
-  const config=kind==="stock"?{eyebrow:"KIỂM KÊ THỦ CÔNG",title:"Kiểm tồn",subtitle:"Chỉ hiện các SKU đã được nhân viên nhập kiểm đếm thủ công.",label:"Tồn kiểm đếm",value:(p:Product)=>String(p.stock)}:kind==="loss"?{eyebrow:"KIỂM SOÁT THẤT THOÁT",title:"Thất thoát",subtitle:"Chỉ hiện các SKU đã được ghi nhận thủ công.",label:"Loss",value:(p:Product)=>String(p.loss)}:{eyebrow:"KIỂM TRA HẠN DÙNG",title:"Hạn dùng",subtitle:"Chỉ hiện các SKU đã được nhập hạn sử dụng thủ công.",label:"Hạn sử dụng",value:(p:Product)=>p.expDate};
-  return <div><PageHead eyebrow={config.eyebrow} title={config.title} subtitle={config.subtitle} actions={canEdit?<button className="primary" onClick={onAdd}>+ Nhập thủ công</button>:undefined}/><div className="check-grid">{products.map((p)=><article key={p.id}><div className="card-top"><span className={"line-token "+(p.shelfLine?"line-"+p.shelfLine:"unassigned")}>{p.shelfLine?p.shelfLine+p.shelfSide:"—"}</span>{kind==="expiry"&&<span className={"badge "+expiryStatus(p.expDate).tone}>{expiryStatus(p.expDate).label}</span>}</div><h2>{p.name}</h2><p>SKU {p.sku} · {p.shelfLine?`POG Line ${p.shelfLine}${p.shelfSide} · Vị trí ${p.shelfPosition}`:"Chưa gán vị trí kệ POG"}</p><strong className="manual-value">{config.label}: {config.value(p)}</strong></article>)}{!products.length&&<div className="empty big grid-empty"><b>Chưa có dữ liệu nhập thủ công</b><span>{canEdit?'Chọn “Nhập thủ công” và nhập SKU để tạo bản ghi đầu tiên.':'Đăng nhập để nhập dữ liệu kiểm tra thủ công.'}</span></div>}</div></div>;
+function ManualCheckGrid({kind,products,canEdit,onAdd}:{kind:"checkLoss"|"checkDate";products:Product[];canEdit:boolean;onAdd:()=>void}) {
+  const isLoss=kind==="checkLoss";
+  const config=isLoss
+    ?{eyebrow:"CHECK LOSS",title:"Check Loss",subtitle:"Gộp kiểm tồn và thất thoát trong một quy trình. Chọn sản phẩm để nhập số liệu thực tế.",empty:"Chọn “Nhập Check Loss” để tìm sản phẩm và nhập tồn thực tế, thất thoát."}
+    :{eyebrow:"CHECK DATE",title:"Check Date",subtitle:"Theo dõi ngày nhập hàng và hạn rút hàng theo từng sản phẩm.",empty:"Chọn “Nhập Check Date” để tìm sản phẩm và nhập hai mốc ngày."};
+  return <div><PageHead eyebrow={config.eyebrow} title={config.title} subtitle={config.subtitle} actions={canEdit?<button className="primary" onClick={onAdd}>+ Nhập {isLoss?"Check Loss":"Check Date"}</button>:undefined}/><div className="check-grid">{products.map((p)=>{
+    const stock=p.manualStock??(p.stockKnown?p.stock:undefined),loss=p.manualLoss??(p.loss||undefined),withdrawDate=p.withdrawDate||p.expDate||"",status=expiryStatus(withdrawDate);
+    return <article key={p.id} className={isLoss?"check-loss-card":"check-date-card"}><div className="card-top"><span className={"line-token "+(p.shelfLine?"line-"+p.shelfLine:"unassigned")}>{p.shelfLine?p.shelfLine+p.shelfSide:"—"}</span>{!isLoss&&withdrawDate&&<span className={"badge "+status.tone}>{status.label}</span>}</div><h2>{p.name}</h2><p>SKU {p.sku} · Barcode {p.barcode||p.supplierBarcode||"—"}</p><p>{p.shelfLine?`POG Line ${p.shelfLine}${p.shelfSide} · Vị trí ${p.shelfPosition}`:"Chưa gán vị trí kệ POG"}</p>{isLoss?<div className="manual-check-metrics"><span><small>Tồn thực tế</small><b>{stock===undefined?"—":money.format(stock)}</b></span><span><small>Thất thoát</small><b>{loss===undefined?"—":money.format(loss)}</b></span></div>:<div className="manual-check-dates"><span><small>Ngày nhập hàng</small><b>{p.inboundDate||"—"}</b></span><span><small>Hạn rút hàng</small><b>{withdrawDate||"—"}</b></span></div>}</article>;
+  })}{!products.length&&<div className="empty big grid-empty"><b>Chưa có dữ liệu {isLoss?"Check Loss":"Check Date"}</b><span>{canEdit?config.empty:"Đăng nhập để nhập dữ liệu kiểm tra thủ công."}</span></div>}</div></div>;
+}
+
+function ManualCheckModal({kind,onSearch,onSave,onClose}:{kind:ManualCheckKind;onSearch:(query:string)=>Promise<Product[]>;onSave:(payload:Record<string,unknown>)=>Promise<void>;onClose:()=>void}) {
+  const isLoss=kind==="checkLoss";
+  const [query,setQuery]=useState(""),[results,setResults]=useState<Product[]>([]),[selected,setSelected]=useState<Product|null>(null),[stock,setStock]=useState(""),[loss,setLoss]=useState("0"),[inboundDate,setInboundDate]=useState(""),[withdrawDate,setWithdrawDate]=useState(""),[loading,setLoading]=useState(false),[saving,setSaving]=useState(false),[error,setError]=useState("");
+  useEffect(()=>{let cancelled=false;const timer=window.setTimeout(async()=>{setLoading(true);setError("");try{const products=await onSearch(query);if(!cancelled)setResults(products);}catch(cause){if(!cancelled)setError(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");}finally{if(!cancelled)setLoading(false);}},query.trim()?120:0);return()=>{cancelled=true;window.clearTimeout(timer);};},[query,onSearch]);
+  const selectProduct=(product:Product)=>{setSelected(product);if(isLoss){setStock(product.manualStock===undefined?"":String(product.manualStock));setLoss(product.manualLoss===undefined?"0":String(product.manualLoss));}else{setInboundDate(product.inboundDate||"");setWithdrawDate(product.withdrawDate||product.expDate||"");}};
+  const validNumber=(value:string)=>/^\d+$/.test(value.trim());
+  const valid=isLoss?Boolean(selected&&validNumber(stock)&&validNumber(loss)):Boolean(selected&&/^\d{4}-\d{2}-\d{2}$/.test(inboundDate)&&/^\d{4}-\d{2}-\d{2}$/.test(withdrawDate)&&withdrawDate>=inboundDate);
+  const save=async()=>{if(!selected||!valid||saving)return;setSaving(true);try{await onSave(isLoss?{kind:"checkLoss",sku:selected.sku,stock:Number(stock),loss:Number(loss)}:{kind:"checkDate",sku:selected.sku,inboundDate,withdrawDate});}finally{setSaving(false);}};
+  return <div className="modal-backdrop"><section className="form-modal manual-check-modal" role="dialog" aria-modal="true" aria-label={isLoss?"Nhập Check Loss":"Nhập Check Date"}><div className="modal-head"><div><p>{isLoss?"CHECK LOSS":"CHECK DATE"}</p><h2>{isLoss?"Nhập tồn & thất thoát":"Nhập ngày hàng"}</h2></div><button onClick={onClose} aria-label="Đóng">×</button></div><div className="manual-check-search"><label>Tìm sản phẩm<input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="Nhập SKU, barcode hoặc tên sản phẩm…"/></label></div><div className="manual-product-results" aria-live="polite">{loading?<div className="search-empty"><i className="mini-spinner"/>Đang tìm sản phẩm…</div>:results.map((product)=><button type="button" key={product.id} className={selected?.id===product.id?"manual-product-result active":"manual-product-result"} onClick={()=>selectProduct(product)}><span>{product.departmentName||product.department||"SP"}</span><div><b>{product.name}</b><small>SKU {product.sku} · Barcode {product.barcode||product.supplierBarcode||"—"}</small></div><em>{product.shelfLine?`POG ${product.shelfLine}${product.shelfSide}`:"Chưa gán POG"}</em></button>)}{!loading&&!results.length&&<div className="search-empty"><b>Không tìm thấy sản phẩm</b><span>Thử SKU, barcode hoặc tên sản phẩm khác.</span></div>}</div>{selected&&<div className="manual-check-form"><div className="manual-check-selected"><b>{selected.name}</b><span>SKU {selected.sku} · Barcode {selected.barcode||selected.supplierBarcode||"—"}</span></div>{isLoss?<div className="manual-check-fields"><label>Tồn thực tế<input type="number" min="0" step="1" inputMode="numeric" value={stock} onChange={(event)=>setStock(event.target.value)} placeholder="0"/></label><label>Thất thoát<input type="number" min="0" step="1" inputMode="numeric" value={loss} onChange={(event)=>setLoss(event.target.value)} placeholder="0"/></label></div>:<div className="manual-check-fields"><label>Ngày nhập hàng<input type="date" value={inboundDate} onChange={(event)=>setInboundDate(event.target.value)}/></label><label>Hạn rút hàng<input type="date" min={inboundDate||undefined} value={withdrawDate} onChange={(event)=>setWithdrawDate(event.target.value)}/></label></div>}{!isLoss&&withdrawDate&&inboundDate&&withdrawDate<inboundDate&&<p className="manual-check-error">Hạn rút hàng không thể trước ngày nhập hàng.</p>}</div>}{error&&<p className="manual-check-error">{error}</p>}<div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" disabled={!valid||saving} onClick={()=>void save()}>{saving?<><i className="mini-spinner"/>Đang lưu…</>:"Lưu kiểm tra"}</button></div></section></div>;
 }
 function OrderView({items,assignedItems,onToggle,onAvailability,onQuantity,onRemove,onClear,onMap}:{items:PickItem[];assignedItems:AssignedPickItem[];onToggle:(p:PickItem)=>void;onAvailability:(p:PickItem)=>void;onQuantity:(p:PickItem,quantity:number)=>void;onRemove:(p:PickItem)=>void;onClear:()=>void;onMap:(p:PickItem)=>void}) {
   const route=["16","15","14","13","12","11","10","09","08","07","06","05","04","03","02","01","17","18","19","20","21","22","23","24","25","26","27","28"];
