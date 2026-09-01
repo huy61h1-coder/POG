@@ -154,11 +154,12 @@ function withUploadedStock(product,index) {
   return {...product,stock:record?.stock||0,stockKnown:Boolean(record),loss:0,expDate:""};
 }
 function manualCheckGroups(state) {
-  const productsById=new Map(state.products.map((product)=>[product.id,product]));
+  const productsById=new Map(state.products.map((product)=>[product.id,product])),uploaded=stockIndex(state.stockRecords);
   const groups={checkLoss:[],stock:[],loss:[],expiry:[]};
   for(const check of state.manualChecks){
     const product=productsById.get(check.productId);if(!product)continue;
-    const enriched={...product,stock:check.stock??product.stock,stockKnown:check.stock!==undefined||product.stockKnown,loss:check.loss??product.loss,manualStock:check.stock,manualLoss:check.loss,inboundDate:check.inboundDate||"",withdrawDate:check.withdrawDate||check.expDate||"",expDate:check.withdrawDate||check.expDate||"",updatedAt:check.updatedAt};
+    const systemProduct=withUploadedStock(product,uploaded),systemStock=systemProduct.stock;
+    const enriched={...systemProduct,stock:check.stock??systemStock,systemStock,stockKnown:check.stock!==undefined||systemProduct.stockKnown,loss:check.loss??product.loss,manualStock:check.stock,manualLoss:check.loss,inboundDate:check.inboundDate||"",withdrawDate:check.withdrawDate||check.expDate||"",expDate:check.withdrawDate||check.expDate||"",updatedAt:check.updatedAt};
     if(check.stock!==undefined||check.loss!==undefined)groups.checkLoss.push(enriched);
     if(check.stock!==undefined)groups.stock.push(enriched);
     if(check.loss!==undefined)groups.loss.push(enriched);
@@ -773,8 +774,12 @@ app.post("/api/store", async (req, res, next) => {
         const isNonNegativeInteger=(input)=>{if(input===null||input===undefined||String(input).trim()==="")return false;const number=Number(input);return Number.isInteger(number)&&number>=0;};
         const isValidDate=(date)=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return false;const timestamp=Date.parse(date+"T00:00:00Z");return Number.isFinite(timestamp)&&new Date(timestamp).toISOString().slice(0,10)===date;};
         if(kind==="checkLoss"){
+          if(!isNonNegativeInteger(body.systemStock))return fail("Tồn hệ thống phải là số nguyên không âm");
           if(!isNonNegativeInteger(body.stock))return fail("Tồn thực tế phải là số nguyên không âm");
           if(body.loss!==undefined&&!isNonNegativeInteger(body.loss))return fail("Thất thoát phải là số nguyên không âm");
+          const systemStock=asInt(body.systemStock),recordIndex=state.stockRecords.findIndex((record)=>normalizeText(record.sku)===normalizeText(product.sku));
+          if(recordIndex>=0)state.stockRecords[recordIndex]={...state.stockRecords[recordIndex],stock:systemStock,updatedAt:now};
+          else state.stockRecords.push({sku:product.sku,stock:systemStock,sales:0,updatedAt:now});
           current.stock=asInt(body.stock);current.loss=body.loss===undefined?Math.max(0,asInt(current.loss)):asInt(body.loss);
         } else if(kind==="stock"){
           if(!isNonNegativeInteger(value))return fail("Tồn kiểm đếm phải là số nguyên không âm");
