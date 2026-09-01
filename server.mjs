@@ -88,8 +88,8 @@ function ensureStateShape(source) {
   state.manualChecks=Array.isArray(state.manualChecks)?state.manualChecks.filter((item)=>asText(item?.productId)).map((item)=>({productId:asText(item.productId),stock:item.stock===undefined?undefined:Math.max(0,asInt(item.stock)),loss:item.loss===undefined?undefined:Math.max(0,asInt(item.loss)),expDate:asText(item.expDate),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.stockImport=state.stockImport&&typeof state.stockImport==="object"?state.stockImport:null;
   const savedBrand=state.appBrand&&typeof state.appBrand==="object"&&typeof state.appBrand.logo==="string"?state.appBrand:null;
-  const legacyLogoSize=Math.max(120,Math.min(320,asInt(savedBrand?.logoSize,220)));
-  const logoSizeDesktop=Math.max(120,Math.min(320,asInt(savedBrand?.logoSizeDesktop,legacyLogoSize)));
+  const legacyLogoSize=Math.max(50,Math.min(320,asInt(savedBrand?.logoSize,220)));
+  const logoSizeDesktop=Math.max(50,Math.min(320,asInt(savedBrand?.logoSizeDesktop,legacyLogoSize)));
   const logoSizeMobile=Math.max(72,Math.min(220,asInt(savedBrand?.logoSizeMobile,Math.round(legacyLogoSize*.55))));
   state.appBrand=savedBrand?{logo:savedBrand.logo,logoSize:logoSizeDesktop,logoSizeDesktop,logoSizeMobile,updatedAt:asInt(savedBrand.updatedAt,Date.now())}:{logo:"/aeon-logo.svg",logoSize:220,logoSizeDesktop:220,logoSizeMobile:120,updatedAt:Date.now()};
   state.lineConfigs=Array.isArray(state.lineConfigs)&&state.lineConfigs.length?state.lineConfigs:lineDefaults.map(([line,name,color,logo])=>({line,name,color,logo,updatedAt:Date.now()}));
@@ -786,7 +786,7 @@ app.post("/api/store", async (req, res, next) => {
         const desktopInput=body.logoSizeDesktop===undefined?body.logoSize:body.logoSizeDesktop;
         const desktopFallback=current.logoSizeDesktop||current.logoSize||220;
         const mobileFallback=current.logoSizeMobile||Math.round(desktopFallback*.55);
-        const logoSizeDesktop=Math.max(120,Math.min(320,asInt(desktopInput,desktopFallback)));
+        const logoSizeDesktop=Math.max(50,Math.min(320,asInt(desktopInput,desktopFallback)));
         const logoSizeMobile=Math.max(72,Math.min(220,asInt(body.logoSizeMobile,mobileFallback)));
         if(logo!=="/aeon-logo.svg"&&(!/^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(logo)||logo.length>1_500_000))return fail("Logo cần là PNG, JPG, WEBP hoặc SVG, dung lượng tối đa 1 MB");
         state.appBrand={logo,logoSize:logoSizeDesktop,logoSizeDesktop,logoSizeMobile,updatedAt:Date.now()};
