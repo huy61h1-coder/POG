@@ -51,7 +51,7 @@ function AppIcon({name}:{name:Tab}) {
 }
 const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"",barcode:"",line:"01",lineName:"SOUVENIR",side:"A",bay:1,price:0,stock:0,loss:0,expDate:"" };
 const money = new Intl.NumberFormat("vi-VN");
-const normalize = (value:string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
+const normalize = (value:unknown) => String(value??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
 // Máy quét/camera đôi khi trả về tiền tố định dạng (ví dụ ]C1) hoặc chữ
 // mô tả. Giữ nguyên số 0 ở đầu nhưng chỉ lấy chuỗi số dài nhất để truy vấn
 // đúng barcode trong Master Data/Stock.
