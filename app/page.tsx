@@ -236,8 +236,12 @@ function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDe
     const stop=()=>{zxingRef.current?.stop();zxingRef.current=null;const source=videoRef.current?.srcObject;if(source instanceof MediaStream)source.getTracks().forEach((track)=>track.stop());if(videoRef.current)videoRef.current.srcObject=null;};
     const accept=(raw:string,controls:{stop:()=>void})=>{
       const value=normalizeScannedBarcode(raw);if(!value||stopped)return;
-      const now=Date.now(),previous=scanRef.current,hits=previous.value===value&&now-previous.at<1400?previous.hits+1:1;scanRef.current={value,hits,at:now};
-      if(hits<2){setStatus("Đã nhận mã "+value+" · đang xác nhận…");return;}
+      // ZXing only calls the callback after a complete checksum-valid decode.
+      // Accept the first valid result instead of waiting for a second frame;
+      // this removes the noticeable confirmation delay on phone cameras.
+      const now=Date.now(),previous=scanRef.current;
+      if(previous.value===value&&now-previous.at<800)return;
+      scanRef.current={value,hits:1,at:now};
       stopped=true;controls.stop();zxingRef.current=null;detectedRef.current(value);
     };
     const start=async()=>{
@@ -246,8 +250,11 @@ function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDe
         if(!navigator.mediaDevices?.getUserMedia)throw new Error("Trình duyệt không hỗ trợ camera. Hãy dùng HTTPS/localhost, máy quét USB hoặc nhập mã.");
         const video=videoRef.current;if(!video)return;
         setStatus("Đang bật camera sau…");
-        const reader=new BrowserMultiFormatReader(undefined,{delayBetweenScanAttempts:70,delayBetweenScanSuccess:220});reader.possibleFormats=[BarcodeFormat.EAN_13,BarcodeFormat.EAN_8,BarcodeFormat.UPC_A,BarcodeFormat.UPC_E,BarcodeFormat.CODE_128,BarcodeFormat.CODE_39,BarcodeFormat.ITF];
-        const preferred={audio:false,video:deviceId?{deviceId:{exact:deviceId},width:{ideal:1920},height:{ideal:1080}}:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}}} as MediaStreamConstraints;
+        const reader=new BrowserMultiFormatReader(undefined,{delayBetweenScanAttempts:35,delayBetweenScanSuccess:100});reader.possibleFormats=[BarcodeFormat.EAN_13,BarcodeFormat.EAN_8,BarcodeFormat.UPC_A,BarcodeFormat.UPC_E,BarcodeFormat.CODE_128,BarcodeFormat.CODE_39,BarcodeFormat.ITF];
+        // 1280×720 is sufficient for retail EAN/UPC codes and starts much
+        // faster than requesting a 1920×1080 stream on mobile devices.
+        const camera={width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}};
+        const preferred={audio:false,video:deviceId?{deviceId:{exact:deviceId},...camera}:{facingMode:{ideal:"environment"},...camera}} as MediaStreamConstraints;
         const scan=(result:{getText:()=>string}|undefined,_error:unknown,controls:{stop:()=>void})=>{if(result)accept(result.getText(),controls);};
         let controls;try{controls=await reader.decodeFromConstraints(preferred,video,scan);}catch(cause){if(deviceId||(cause as DOMException)?.name!=="OverconstrainedError")throw cause;controls=await reader.decodeFromConstraints({audio:false,video:true},video,scan);}
         if(stopped){controls.stop();return;}zxingRef.current=controls;setTorchAvailable(Boolean(controls.switchTorch));setStatus("Đưa mã vạch vào giữa khung hình để quét.");
