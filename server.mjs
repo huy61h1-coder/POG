@@ -153,6 +153,7 @@ const aiIntentGroups = [
   { triggers:["du lich","da ngoai","picnic"], keywords:["nuoc","banh","mi","do hop","khan","tui","thit","xuc xich","trai cay","nonfood"] },
 ];
 const aiStopWords = new Set(["cho","voi","va","cua","mot","nhieu","nguoi","phan","mon","can","mua","nau","lam","tai","theo","uu","tien","dang","co","san","pham"]);
+const aiDishWords = new Set(["pho","bun","com","lau","salad","sushi","sashimi","curry","cari","mi","goi","banh","nuong","bbq","sandwich","spring","roll"]);
 
 function availableProducts(products) {
   const today = new Date().toISOString().slice(0,10);
@@ -207,7 +208,7 @@ function pushExpiryTop(heap,product,limit){
 
 function intentTerms(query) {
   const normalized = normalizeText(query);
-  const terms = new Set(normalized.split(/[^a-z0-9]+/).filter((term) => term.length > 1&&!aiStopWords.has(term)&&!/^[0-9]+$/.test(term)));
+  const terms = new Set(normalized.split(/[^a-z0-9]+/).filter((term) => term.length > 1&&!aiStopWords.has(term)&&!aiDishWords.has(term)&&!/^[0-9]+$/.test(term)));
   for (const group of aiIntentGroups) if (group.triggers.some((trigger) => normalized.includes(trigger))) group.keywords.forEach((term) => terms.add(term));
   return [...terms];
 }
@@ -216,9 +217,10 @@ function rankedProducts(query, products) {
   const terms = intentTerms(query);
   return availableProducts(products).map((product) => {
     const haystack = productSearchText(product);
-    const tokens = new Set(haystack.split(/[^a-z0-9]+/).filter(Boolean));
-    const matchedTerms=terms.filter((term)=>tokens.has(term)||haystack.includes(term));
-    const score = matchedTerms.reduce((total,term) => total + (tokens.has(term) ? (term.length > 3 ? 7 : 3) : (term.includes(" ") ? 6 : 1)),0) + Math.min(2,product.stock/20);
+    const tokenList=haystack.split(/[^a-z0-9]+/).filter(Boolean),tokens = new Set(tokenList);
+    const matchesTerm=(term)=>{const parts=term.split(/\s+/).filter(Boolean);if(parts.length===1)return tokens.has(term);for(let index=0;index<=tokenList.length-parts.length;index++){if(parts.every((part,offset)=>tokenList[index+offset]===part))return true;}return false;};
+    const matchedTerms=terms.filter(matchesTerm);
+    const score = matchedTerms.reduce((total,term) => total + (term.includes(" ") ? 12 : term.length > 3 ? 4 : 1),0) + Math.min(1,product.stock/50);
     return { product, score, matchedTerms };
   }).sort((a,b) => b.score-a.score || b.product.stock-a.product.stock);
 }
