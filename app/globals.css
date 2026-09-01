@@ -249,4 +249,6 @@
 .logo-size-control{display:grid;grid-template-columns:minmax(58px,auto) minmax(0,1fr) auto;align-items:center;gap:8px}
 .logo-size-control>span{font-weight:850;color:var(--ink)}
 .logo-size-control>input{grid-column:1/-1}
+.settings-save-note{margin-left:auto;color:var(--muted);font-size:9px;font-weight:750}
 @media(max-width:800px){.ops-brand{width:var(--brand-logo-slot-width-mobile,120px);height:42px;flex-basis:var(--brand-logo-slot-width-mobile,120px)}.ops-brand img{width:120px;transform:scale(var(--brand-logo-scale-mobile,1))}.app-logo-previews{grid-template-columns:1fr}.app-logo-preview{min-height:88px}.app-logo-preview img{max-height:64px}}
+@media(max-width:520px){.settings-save-note{display:none}}
