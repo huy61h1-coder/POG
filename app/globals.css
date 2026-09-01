@@ -209,3 +209,17 @@
   .order-list article>.pick-quantity,.order-list article>.badge,.order-list article>button:not(.pick-check):not(.availability-toggle){grid-column:2/4}
   .order-list article>.badge{display:inline-flex}
 }
+
+/* Mobile: the area below the POG is reserved for the selected product detail.
+   Keep the shelf image free of a duplicate card so it stays readable. */
+@media(max-width:800px){
+  .pog-canvas-layout>.pog-visual>.pog-product-details{display:none}
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details,
+  .pog-canvas-layout.pog-search-expanded>.pog-mobile-results>.pog-product-details{
+    display:block;
+    width:100%;
+    margin:0;
+    padding:12px;
+  }
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details dl{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
