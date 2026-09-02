@@ -550,3 +550,39 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
   .product-image-tools>img{order:0}
   .product-image-tools>span{min-width:0;width:100%}
 }
+
+/* Compact product lists: keep the fields used during daily checking visible
+   and reveal the complete Master/Stock record on demand. */
+.master-table.compact-table{min-width:1080px}
+.compact-table th,.compact-table td{vertical-align:middle}
+.compact-table th:nth-child(3),.compact-table td:nth-child(3){min-width:250px}
+.compact-table th:nth-child(4),.compact-table td:nth-child(4){min-width:84px}
+.compact-table th:nth-child(5),.compact-table td:nth-child(5){min-width:92px}
+.compact-table th:nth-child(6),.compact-table td:nth-child(6),.compact-table th:nth-child(7),.compact-table td:nth-child(7){min-width:125px}
+.compact-table th:nth-child(8),.compact-table td:nth-child(8){min-width:165px}
+.compact-table th:last-child,.compact-table td:last-child{min-width:155px}
+.compact-table .compact-row-actions{justify-content:flex-start;flex-wrap:wrap;gap:5px}
+.compact-table .compact-row-actions button{white-space:nowrap}
+.details-button{border-color:#e4bfd7!important;background:#fff7fc!important;color:var(--brand)!important}
+.details-button:hover:not(:disabled){border-color:var(--brand)!important;background:var(--accent)!important}
+.master-detail-row>td{padding:0!important;border-top:0!important;background:#fff8fc!important;white-space:normal!important}
+.master-detail-row>td::before{display:none!important;content:none!important}
+.product-detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:14px 16px;border-top:1px dashed #e5cadb;background:linear-gradient(110deg,#fff8fc,#fff)}
+.product-detail-grid>div{min-width:0;padding:9px 10px;border:1px solid #f0e1eb;border-radius:9px;background:#fff}
+.product-detail-grid span{display:block;margin-bottom:4px;color:var(--muted);font-size:8px;font-weight:850;letter-spacing:.04em;text-transform:uppercase}
+.product-detail-grid b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);font-size:10px;line-height:1.35}
+.stock-table td[data-label="Stock"]{white-space:nowrap}
+.stock-table .stock-value{display:block;margin-bottom:3px;color:var(--ink);font-size:11px;font-weight:850}
+
+@media(max-width:800px){
+  .master-table.compact-table{min-width:0}
+  .compact-table th:nth-child(n),.compact-table td:nth-child(n){min-width:0}
+  .compact-table .master-detail-row{display:block;padding:0!important;border:0!important;background:transparent!important}
+  .compact-table .master-detail-row>td{display:block;padding:0!important;border:0!important}
+  .compact-table .master-detail-row .product-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr));padding:12px 0 0}
+  .product-detail-grid>div{padding:8px}
+  .product-detail-grid span{font-size:7px}
+  .product-detail-grid b{font-size:9px}
+  .stock-table td[data-label="Stock"]{display:block}
+  .stock-table .stock-value{display:inline-block;margin:0 7px 0 0}
+}
