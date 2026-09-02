@@ -738,3 +738,13 @@ body{min-width:320px}
   .head-actions>.primary,.head-actions>.ghost{font-size:10px}
   .panel-title{padding-inline:12px}
 }
+
+/* Keep desktop navigation visible while the main content scrolls. Grid items
+   stretch by default, so align-self:start lets sticky stay viewport-anchored. */
+@media(min-width:801px){
+  .ops-body{align-items:start}
+  .side-nav{position:sticky;top:76px;align-self:start;height:calc(100vh - 76px);overflow-y:auto;overscroll-behavior:contain}
+}
+@media(min-width:801px) and (max-width:1199px){
+  .side-nav{top:68px;height:calc(100vh - 68px)}
+}
