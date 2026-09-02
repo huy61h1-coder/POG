@@ -574,8 +574,42 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
 .stock-table td[data-label="Stock"]{white-space:nowrap}
 .stock-table .stock-value{display:block;margin-bottom:3px;color:var(--ink);font-size:11px;font-weight:850}
 
+/* Content-aware column sizing for the compact product tables. The previous
+   auto layout spread leftover width across every column, leaving large gaps
+   beside short values while squeezing product names. Keep the controls and
+   numeric fields compact, and reserve the flexible space for text fields. */
+.master-data-table{table-layout:fixed;min-width:1120px}
+.master-data-table th,.master-data-table td{box-sizing:border-box}
+.master-data-table th:nth-child(1),.master-data-table td:nth-child(1){width:6%;min-width:66px}
+.master-data-table th:nth-child(2),.master-data-table td:nth-child(2){width:10%;min-width:100px}
+.master-data-table th:nth-child(3),.master-data-table td:nth-child(3){width:27%;min-width:270px}
+.master-data-table th:nth-child(4),.master-data-table td:nth-child(4){width:6%;min-width:72px;text-align:right}
+.master-data-table th:nth-child(5),.master-data-table td:nth-child(5){width:8%;min-width:88px;text-align:right}
+.master-data-table th:nth-child(6),.master-data-table td:nth-child(6){width:8%;min-width:96px}
+.master-data-table th:nth-child(7),.master-data-table td:nth-child(7){width:11%;min-width:120px}
+.master-data-table th:nth-child(8),.master-data-table td:nth-child(8){width:10%;min-width:150px}
+.master-data-table th:nth-child(9),.master-data-table td:nth-child(9){width:14%;min-width:170px}
+.master-data-table td:nth-child(3)>strong{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-height:1.35;white-space:normal;overflow-wrap:anywhere}
+.master-data-table td:nth-child(6),.master-data-table td:nth-child(7){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.master-data-table td:nth-child(8)>b{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-height:1.35;white-space:normal}
+.master-data-table .compact-row-actions{align-items:flex-start}
+
+.stock-data-table{table-layout:fixed;min-width:980px}
+.stock-data-table th,.stock-data-table td{box-sizing:border-box}
+.stock-data-table th:nth-child(1),.stock-data-table td:nth-child(1){width:12%;min-width:110px}
+.stock-data-table th:nth-child(2),.stock-data-table td:nth-child(2){width:32%;min-width:260px}
+.stock-data-table th:nth-child(3),.stock-data-table td:nth-child(3){width:8%;min-width:74px;text-align:right}
+.stock-data-table th:nth-child(4),.stock-data-table td:nth-child(4){width:10%;min-width:88px;text-align:right}
+.stock-data-table th:nth-child(5),.stock-data-table td:nth-child(5){width:14%;min-width:120px}
+.stock-data-table th:nth-child(6),.stock-data-table td:nth-child(6){width:10%;min-width:96px}
+.stock-data-table th:nth-child(7),.stock-data-table td:nth-child(7){width:14%;min-width:145px}
+.stock-data-table td:nth-child(2)>strong{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-height:1.35;white-space:normal;overflow-wrap:anywhere}
+.stock-data-table td:nth-child(5),.stock-data-table td:nth-child(6){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 @media(max-width:800px){
   .master-table.compact-table{min-width:0}
+  .master-data-table,.stock-data-table{table-layout:auto}
+  .master-data-table th,.master-data-table td,.stock-data-table th,.stock-data-table td{width:auto!important}
   .compact-table th:nth-child(n),.compact-table td:nth-child(n){min-width:0}
   .compact-table .master-detail-row{display:block;padding:0!important;border:0!important;background:transparent!important}
   .compact-table .master-detail-row>td{display:block;padding:0!important;border:0!important}
