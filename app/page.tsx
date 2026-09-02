@@ -438,6 +438,14 @@ export default function Home() {
     finally { setBusy(false); }
   };
 
+  const uploadCloudinaryImage = async (file:File,sku:string) => {
+    const form=new FormData();form.set("file",file);form.set("sku",sku);
+    const response=await fetch("/api/cloudinary/upload",{method:"POST",body:form});
+    const result=await response.json() as {url?:string;error?:string};
+    if(!response.ok||!result.url)throw new Error(result.error||"Không thể tải ảnh lên Cloudinary");
+    return result.url;
+  };
+
   const authenticate = async (credentials:{username:string;password:string;name?:string}) => {
     if(!authMode)return;
     setBusy(true);setError("");
@@ -602,7 +610,7 @@ export default function Home() {
       <input ref={stockExcelRef} type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden onChange={(e)=>void importStockExcel(e.target.files?.[0])}/>
 
       {productDetails&&<ProductInfoModal product={productDetails} onClose={()=>setProductDetails(null)} onMap={productDetails.shelfLine?()=>{setProductDetails(null);openProductOnMap(productDetails,true);}:undefined} onPick={async()=>{await quickAdd(productDetails);}}/>}
-      {productModal&&<ProductModal value={productModal} onChange={setProductModal} onClose={()=>setProductModal(null)} onSave={async()=>{if(await mutate("upsertProduct",{product:productModal}))setProductModal(null);}}/>}
+      {productModal&&<ProductModal value={productModal} onChange={setProductModal} onClose={()=>setProductModal(null)} onUploadCloudinary={uploadCloudinaryImage} onSave={async()=>{if(await mutate("upsertProduct",{product:productModal}))setProductModal(null);}}/>}
        {assignmentProduct&&<AssignPickModal product={assignmentProduct} users={data.users.filter((user)=>user.active)} customerNames={[...new Set([...data.assignedPicking,...(data.orderHistory||[])].map((item)=>item.customerName?.trim()).filter(Boolean) as string[])]} onClose={()=>setAssignmentProduct(null)} onAssign={async(assignment)=>{if(await mutate("assignPick",{productId:assignmentProduct.id,...assignment}))setAssignmentProduct(null);}}/>}
       {manualCheckModal&&<ManualCheckModal kind={manualCheckModal} onSearch={searchManualProducts} onSave={saveManualCheck} onClose={()=>setManualCheckModal(null)}/>}
       {settingsOpen&&<SettingsModal
@@ -836,11 +844,18 @@ function SuggestView({value,onValue,onGenerate,result,busy,error,totalProducts,o
     </div>
   </div>;
 }
-function ProductModal({value,onChange,onClose,onSave}:{value:Product;onChange:(p:Product)=>void;onClose:()=>void;onSave:()=>void}) {
+function ProductModal({value,onChange,onClose,onUploadCloudinary,onSave}:{value:Product;onChange:(p:Product)=>void;onClose:()=>void;onUploadCloudinary:(file:File,sku:string)=>Promise<string>;onSave:()=>void}) {
   const imageRef=useRef<HTMLInputElement>(null);
+  const videoRef=useRef<HTMLVideoElement>(null),canvasRef=useRef<HTMLCanvasElement>(null),streamRef=useRef<MediaStream|null>(null);
+  const [cameraOpen,setCameraOpen]=useState(false),[cameraBusy,setCameraBusy]=useState(false),[cameraError,setCameraError]=useState("");
   const set=(key:keyof Product,next:string|number)=>onChange({...value,[key]:next});
   const setSupplierBarcode=(next:string)=>onChange({...value,supplierBarcode:next});
   const selectImage=(file?:File)=>{if(!file)return;if(file.size>1024*1024){window.alert("Ảnh sản phẩm tối đa 1 MB.");return;}if(file.type&&!file.type.startsWith("image/")){window.alert("Vui lòng chọn tệp hình ảnh.");return;}const reader=new FileReader();reader.onload=()=>{if(typeof reader.result==="string")onChange({...value,imageUrl:reader.result});};reader.onerror=()=>window.alert("Không thể đọc tệp hình ảnh.");reader.readAsDataURL(file);};
+  useEffect(()=>()=>{streamRef.current?.getTracks().forEach((track)=>track.stop());},[]);
+  useEffect(()=>{if(cameraOpen&&videoRef.current&&streamRef.current){videoRef.current.srcObject=streamRef.current;void videoRef.current.play().catch(()=>undefined);}},[cameraOpen]);
+  const stopCamera=()=>{streamRef.current?.getTracks().forEach((track)=>track.stop());streamRef.current=null;if(videoRef.current)videoRef.current.srcObject=null;setCameraOpen(false);setCameraError("");};
+  const startCamera=async()=>{setCameraError("");if(!navigator.mediaDevices?.getUserMedia){setCameraError("Trình duyệt không hỗ trợ camera. Hãy dùng HTTPS/localhost hoặc chọn ảnh từ máy.");return;}try{streamRef.current=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:1280}}});setCameraOpen(true);}catch(cause){const error=cause as DOMException;setCameraError(error?.name==="NotAllowedError"?"Bạn chưa cấp quyền camera cho trình duyệt.":"Không thể mở camera. Hãy kiểm tra quyền truy cập hoặc chọn ảnh từ máy.");}};
+  const captureCamera=async()=>{const video=videoRef.current,canvas=canvasRef.current;if(!video||!canvas||!video.videoWidth||!video.videoHeight||cameraBusy)return;const scale=Math.min(1,1600/video.videoWidth,1600/video.videoHeight);canvas.width=Math.max(1,Math.round(video.videoWidth*scale));canvas.height=Math.max(1,Math.round(video.videoHeight*scale));const context=canvas.getContext("2d");if(!context){setCameraError("Không thể xử lý ảnh từ camera.");return;}context.drawImage(video,0,0,canvas.width,canvas.height);const blob=await new Promise<Blob|null>((resolve)=>canvas.toBlob(resolve,"image/jpeg",.84));if(!blob){setCameraError("Không thể tạo ảnh chụp.");return;}setCameraBusy(true);setCameraError("");try{const file=new File([blob],`${value.sku||"product"}-${Date.now()}.jpg`,{type:"image/jpeg"}),url=await onUploadCloudinary(file,value.sku),images=[...new Set([...productImageUrls(value.imageUrl),url])].slice(0,32).join("|");onChange({...value,imageUrl:images});stopCamera();}catch(cause){setCameraError(cause instanceof Error?cause.message:"Không thể tải ảnh lên Cloudinary");}finally{setCameraBusy(false);}};
   return <div className="modal-backdrop"><section className="form-modal product-modal"><div className="modal-head"><div><p>MASTER DATA</p><h2>{value.id?"Chỉnh sửa sản phẩm":"Thêm sản phẩm"}</h2></div><button onClick={onClose}>×</button></div><div className="form-grid">
     <h3 className="form-section-title">Thông tin Master Data</h3>
     <label>SKU<input value={value.sku} onChange={(e)=>set("sku",e.target.value)}/></label><label>BARCODE NCC<input value={value.supplierBarcode||""} onChange={(e)=>setSupplierBarcode(e.target.value)}/></label><label>BARCODE AEON<input value={value.barcode||""} onChange={(e)=>set("barcode",e.target.value)}/></label>
@@ -848,7 +863,7 @@ function ProductModal({value,onChange,onClose,onSave}:{value:Product;onChange:(p
     <label>Division<input value={value.division||""} onChange={(e)=>set("division",e.target.value)}/></label><label>DIVISION NAME<input value={value.divisionName||""} onChange={(e)=>set("divisionName",e.target.value)}/></label>
     <label>Department<input value={value.department||""} onChange={(e)=>set("department",e.target.value)}/></label><label>DEPARTMENT NAME<input value={value.departmentName||""} onChange={(e)=>set("departmentName",e.target.value)}/></label>
     <label>Giá bán retail<input type="number" min="0" value={value.price} onChange={(e)=>set("price",Number(e.target.value))}/></label><label>Giá khuyến mãi<input type="number" min="0" value={value.promoPrice||0} onChange={(e)=>set("promoPrice",Number(e.target.value))}/></label><label>Sale<input type="number" min="0" value={value.sales||0} onChange={(e)=>set("sales",Number(e.target.value))}/></label><label className="wide">Link hình ảnh<input value={value.imageUrl||""} onChange={(e)=>set("imageUrl",e.target.value)} placeholder="https://.../mặt-trước.jpg | https://.../mặt-sau.jpg"/></label>
-    <div className="product-image-tools wide"><button type="button" className="ghost" onClick={()=>imageRef.current?.click()}>↑ Chọn ảnh từ máy</button>{value.imageUrl&&<button type="button" className="ghost" onClick={()=>onChange({...value,imageUrl:""})}>Xóa ảnh</button>}<input ref={imageRef} hidden type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onChange={(e)=>{selectImage(e.target.files?.[0]);if(imageRef.current)imageRef.current.value="";}}/><ProductImageCarousel key={`${value.id}:${value.imageUrl||""}`} value={value.imageUrl} alt={value.name||"Ảnh sản phẩm"} className="product-modal-image-preview"/></div>
+    <div className="product-image-tools wide"><button type="button" className="ghost" onClick={()=>imageRef.current?.click()}>↑ Chọn ảnh từ máy</button><button type="button" className="ghost" onClick={()=>void startCamera()}>▣ Chụp ảnh</button>{value.imageUrl&&<button type="button" className="ghost" onClick={()=>onChange({...value,imageUrl:""})}>Xóa ảnh</button>}<input ref={imageRef} hidden type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onChange={(e)=>{selectImage(e.target.files?.[0]);if(imageRef.current)imageRef.current.value="";}}/><ProductImageCarousel key={`${value.id}:${value.imageUrl||""}`} value={value.imageUrl} alt={value.name||"Ảnh sản phẩm"} className="product-modal-image-preview"/>{cameraError&&<p className="camera-error" role="alert">{cameraError}</p>}{cameraOpen&&<div className="product-camera-panel"><video ref={videoRef} muted playsInline/><canvas ref={canvasRef} hidden/><div><button type="button" className="primary" disabled={cameraBusy} onClick={()=>void captureCamera()}>{cameraBusy?"Đang tải lên…":"Chụp & tải lên"}</button><button type="button" className="ghost" disabled={cameraBusy} onClick={stopCamera}>Hủy</button></div><small>Ảnh chụp sẽ tự tải lên Cloudinary và thêm vào danh sách ảnh của sản phẩm.</small></div>}</div>
     <p className="form-note wide">Cột IMAGE URL / LINK HÌNH ẢNH trong Excel được đọc tự động. Dùng dấu <b>|</b> để ngăn cách nhiều link ảnh; ảnh đầu tiên sẽ hiển thị mặc định. Bạn cũng có thể chọn tệp PNG, JPG, WEBP, GIF, SVG (tối đa 1 MB).</p>
   </div><div className="modal-actions"><button className="ghost" onClick={onClose}>Hủy</button><button className="primary" onClick={onSave}>Lưu sản phẩm</button></div></section></div>;
 }

@@ -963,6 +963,29 @@ app.get("/api/stock/import/:jobId",async(req,res,next)=>{
   try{const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});const job=stockJobs.get(asText(req.params.jobId));if(!job)return res.status(404).json({error:"Không tìm thấy lần nhập Stock"});if(job.ownerId!==actor.userId&&actor.role!=="ADMIN")return res.status(403).json({error:"Bạn không có quyền xem lần nhập này"});res.set("Cache-Control","no-store").json(publicMasterJob(job));}catch(error){next(error);}
 });
 
+app.post("/api/cloudinary/upload", requireManager, upload.single("file"), async(req,res,next)=>{
+  try {
+    const cloudName=asText(process.env.CLOUDINARY_CLOUD_NAME),apiKey=asText(process.env.CLOUDINARY_API_KEY),apiSecret=asText(process.env.CLOUDINARY_API_SECRET);
+    if(!cloudName||!apiKey||!apiSecret)return res.status(503).json({error:"Cloudinary chưa được cấu hình trên máy chủ"});
+    if(!req.file)return res.status(400).json({error:"Chưa nhận được ảnh sản phẩm"});
+    if(!req.file.mimetype||!req.file.mimetype.startsWith("image/"))return res.status(400).json({error:"Chỉ hỗ trợ tệp hình ảnh"});
+    if(req.file.size>8*1024*1024)return res.status(413).json({error:"Ảnh sản phẩm tối đa 8 MB"});
+    if(!/^[a-z0-9_-]+$/i.test(cloudName))return res.status(500).json({error:"CLOUDINARY_CLOUD_NAME không hợp lệ"});
+    const folder=asText(process.env.CLOUDINARY_FOLDER||"products").replace(/[^a-zA-Z0-9/_-]/g,"").replace(/^\/+|\/+$/g,"");
+    const sku=asText(req.body?.sku).replace(/[^a-zA-Z0-9_-]/g,"").slice(0,80),publicId=(sku||"product")+"-"+randomUUID().replace(/-/g,"").slice(0,16),timestamp=Math.floor(Date.now()/1000);
+    const signedParams={timestamp,public_id:publicId,...(folder?{folder}: {})};
+    const signatureBase=Object.entries(signedParams).sort(([left],[right])=>left.localeCompare(right)).map(([key,value])=>key+"="+value).join("&");
+    const signature=createHash("sha1").update(signatureBase+apiSecret).digest("hex");
+    const form=new FormData();form.append("file",new Blob([req.file.buffer],{type:req.file.mimetype}),req.file.originalname||"product.jpg");
+    for(const [key,value] of Object.entries(signedParams))form.append(key,String(value));
+    form.append("api_key",apiKey);form.append("signature",signature);
+    const response=await fetch("https://api.cloudinary.com/v1_1/"+encodeURIComponent(cloudName)+"/image/upload",{method:"POST",body:form});
+    const payload=await response.json().catch(()=>({}));
+    if(!response.ok||!payload.secure_url){const detail=asText(payload?.error?.message);return res.status(502).json({error:detail?"Cloudinary: "+detail:"Không thể tải ảnh lên Cloudinary"});}
+    res.json({ok:true,url:payload.secure_url,publicId:payload.public_id||publicId,assetId:payload.asset_id||""});
+  } catch(error) { next(error); }
+});
+
 app.post("/api/ai/suggest", async (req, res, next) => {
   try {
     const state=await store.read(),actor=actorFrom(req,state)||guestActor;

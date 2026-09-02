@@ -25,7 +25,8 @@ npm run build
 4. Configure the environment variable `DATABASE_URL` with the PostgreSQL connection string.
 5. Optionally set `BOOTSTRAP_ADMIN_USERNAME`, `BOOTSTRAP_ADMIN_PASSWORD`, and `BOOTSTRAP_ADMIN_NAME` to create the first Admin securely at startup. Without these values, the first screen lets you create the initial Admin once.
 6. Add `OPENAI_API_KEY` as a secret environment variable to enable AI recommendations. The default model is `gpt-5-mini`; override it with `OPENAI_MODEL` when needed.
-7. Set build command to `npm run build` and start command to `npm run start`.
+7. Add the Cloudinary server secrets `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`; optionally set `CLOUDINARY_FOLDER` (default `products`) to enable camera uploads. Never expose `CLOUDINARY_API_SECRET` in browser variables.
+8. Set build command to `npm run build` and start command to `npm run start`.
 
 The app creates its `fulfillment_state` table automatically on first start. Set `UPLOAD_DIR` to a persistent shared volume for uploaded POG images/PDFs; a temporary application filesystem can be cleared during redeploy. When `DATABASE_URL` is omitted, the app uses `DATA_DIR/store.json` only for local demo use.
 
@@ -35,6 +36,7 @@ The app creates its `fulfillment_state` table automatically on first start. Set 
 - Nine-column Product Master Data with background `.xlsx` updates merged by SKU (up to 500,000 rows / 100 MB), upload/import progress, reconnect recovery, and a bounded import queue
 - Server-side product search, filters, expiry ordering, CSV streaming, and 100-row pagination so the browser never renders the whole catalog at once
 - Product create, edit, delete, and CSV export for Manager/Admin
+- Product image links (multiple URLs separated by `|`) and camera capture with signed Cloudinary upload for Manager/Admin
 - Password login and Admin-managed Staff/Manager/Admin permissions
 - Stock, loss, expiry, and picking workflow
 - POG map with A/B shelf plans
