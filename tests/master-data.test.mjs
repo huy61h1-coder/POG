@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeMasterRecords, normalizeMasterProduct, parseMasterDataRows } from "../lib/master-data.mjs";
+import { mergeMasterRecords, normalizeImageUrl, normalizeMasterProduct, parseMasterDataRows } from "../lib/master-data.mjs";
 
 const headers=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"];
 
@@ -30,6 +30,18 @@ test("chấp nhận bí danh tên cột và loại Line ngoài 01–28",()=>{
   assert.match(parsed.issues[0].reason,/01 đến 28/);
 });
 
+test("đọc cột link hình ảnh tùy chọn và lọc URL không hợp lệ",()=>{
+  const parsed=parseMasterDataRows([
+    [...headers,"LINK ẢNH"],
+    ["A1","Hàng có ảnh","12","HOME","1201","HOUSEHOLD","123","Line 12","HOUSEHOLD","https://cdn.example.com/a.jpg"],
+    ["A2","Hàng không ảnh hợp lệ","12","HOME","1201","HOUSEHOLD","456","12","HOUSEHOLD","javascript:alert(1)"],
+  ]);
+  assert.equal(parsed.records[0].imageUrl,"https://cdn.example.com/a.jpg");
+  assert.equal(parsed.records[1].imageUrl,"");
+  assert.equal(normalizeImageUrl("data:image/png;base64,AAAA"),"data:image/png;base64,AAAA");
+  assert.equal(normalizeImageUrl("javascript:alert(1)"),"");
+});
+
 test("không nhập SKU trùng có nội dung mâu thuẫn",()=>{
   const parsed=parseMasterDataRows([
     headers,
@@ -55,8 +67,8 @@ test("mặc định chấp nhận nhiều hơn 10.000 dòng",()=>{
 });
 
 test("merge theo SKU chỉ thay Master Data và giữ dữ liệu vận hành",()=>{
-  const existing={id:"p1",sku:"A1",name:"Tên cũ",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"111",barcode:"111",line:"01",lineName:"OLD",side:"B",bay:7,price:99000,stock:18,loss:3,expDate:"2027-02-01",custom:"keep"};
-  const records=[{sku:"A1",name:"Tên mới",division:"10",divisionName:"FOOD",department:"1001",departmentName:"DAIRY",supplierBarcode:"999",line:"02",lineName:"CHOCO"},{sku:"B1",name:"Hàng mới",division:"20",divisionName:"NONFOOD",department:"2001",departmentName:"HOME",supplierBarcode:"888",line:"12",lineName:"HOUSEHOLD"}];
+  const existing={id:"p1",sku:"A1",name:"Tên cũ",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"111",barcode:"111",line:"01",lineName:"OLD",side:"B",bay:7,price:99000,stock:18,loss:3,expDate:"2027-02-01",imageUrl:"https://cdn.example.com/old.jpg",custom:"keep"};
+  const records=[{sku:"A1",name:"Tên mới",division:"10",divisionName:"FOOD",department:"1001",departmentName:"DAIRY",supplierBarcode:"999",line:"02",lineName:"CHOCO",imageUrl:"https://cdn.example.com/new.jpg"},{sku:"B1",name:"Hàng mới",division:"20",divisionName:"NONFOOD",department:"2001",departmentName:"HOME",supplierBarcode:"888",line:"12",lineName:"HOUSEHOLD"}];
   const merged=mergeMasterRecords([existing],records,{createId:()=>"new-id",now:123});
   assert.equal(merged.created,1);
   assert.equal(merged.updated,1);
@@ -64,6 +76,7 @@ test("merge theo SKU chỉ thay Master Data và giữ dữ liệu vận hành",(
   const updated=merged.products.find((product)=>product.id==="p1");
   assert.equal(updated.name,"Tên mới");
   assert.equal(updated.barcode,"999");
+  assert.equal(updated.imageUrl,"https://cdn.example.com/new.jpg");
   assert.equal(updated.side,"B");
   assert.equal(updated.bay,7);
   assert.equal(updated.price,99000);

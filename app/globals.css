@@ -512,3 +512,25 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
   .order-page .customer-order-items p>b{font-size:9px}
   .order-page .customer-order-items small{font-size:7px}
 }
+
+/* Product imagery: keep links and manually selected files visible in Master
+   Data without making the table or edit form harder to use on a phone. */
+.product-table-image{width:48px;height:48px;border:1px solid var(--line);border-radius:10px;background:#faf7f9;color:var(--muted);display:grid;place-items:center;overflow:hidden;font-size:12px;font-weight:900}
+.product-table-image img{display:block;width:100%;height:100%;object-fit:contain;background:#fff}
+.product-table-image>span{padding:3px;color:var(--muted);font-size:7px;line-height:1.15;text-align:center;text-transform:uppercase}
+.master-table th:first-child,.master-table td:first-child{width:66px;min-width:66px}
+.master-table th:nth-child(3),.master-table td:nth-child(3){min-width:270px;white-space:normal}
+.master-table th:nth-child(5),.master-table td:nth-child(5),.master-table th:nth-child(7),.master-table td:nth-child(7),.master-table th:nth-child(9),.master-table td:nth-child(9){min-width:145px}
+.product-image-tools{min-width:0;min-height:82px;padding:10px;border:1px dashed color-mix(in srgb,var(--brand) 28%,var(--line));border-radius:11px;background:#fffafd;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.product-image-tools>button{min-height:36px}
+.product-image-tools>img{width:60px;height:60px;order:3;object-fit:contain;border:1px solid var(--line);border-radius:9px;background:#fff}
+.product-image-tools>span{min-width:180px;flex:1;color:var(--muted);font-size:9px;line-height:1.4}
+.product-modal .form-note{margin-bottom:2px}
+@media(max-width:800px){
+  .master-table th:nth-child(3),.master-table td:nth-child(3){min-width:0}
+  .master-table th:first-child,.master-table td:first-child{width:auto;min-width:0}
+  .product-table-image{width:42px;height:42px}
+  .product-image-tools{align-items:flex-start;flex-direction:column}
+  .product-image-tools>img{order:0}
+  .product-image-tools>span{min-width:0;width:100%}
+}

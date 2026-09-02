@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { strToU8, zipSync } from "fflate";
-import { normalizeMasterProduct } from "./lib/master-data.mjs";
+import { normalizeImageUrl, normalizeMasterProduct } from "./lib/master-data.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
@@ -573,10 +573,11 @@ async function mergeMasterResultFile(products,resultPath,job) {
     if(!line)continue;
     if(!metadata){metadata=JSON.parse(line);continue;}
     const source=JSON.parse(line),sku=asText(source.sku),key=sku.toUpperCase();if(!key)continue;
-    const master={sku,name:asText(source.name),division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode:asText(source.supplierBarcode),line:cleanLine(source.line),lineName:asText(source.lineName)};
+    const rawImage=asText(source.imageUrl),incomingImage=source.imageUrl===undefined||!rawImage?undefined:normalizeImageUrl(rawImage),master={sku,name:asText(source.name),division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode:asText(source.supplierBarcode),line:cleanLine(source.line),lineName:asText(source.lineName)};
+    if(incomingImage!==undefined)master.imageUrl=incomingImage;
     const index=indexBySku.get(key);
-    if(index===undefined){indexBySku.set(key,nextProducts.length);nextProducts.push({...master,id:randomUUID(),barcode:master.supplierBarcode,side:"A",bay:1,price:0,stock:0,loss:0,expDate:"",updatedAt:Date.now()});created++;}
-    else {const current=nextProducts[index],changed=masterFields.some((field)=>asText(current?.[field])!==master[field])||asText(current?.barcode)!==master.supplierBarcode;if(changed){nextProducts[index]={...current,...master,barcode:master.supplierBarcode,updatedAt:Date.now()};updated++;}else unchanged++;}
+    if(index===undefined){indexBySku.set(key,nextProducts.length);nextProducts.push({...master,id:randomUUID(),barcode:master.supplierBarcode,side:"A",bay:1,price:0,stock:0,loss:0,expDate:"",imageUrl:incomingImage||"",updatedAt:Date.now()});created++;}
+    else {const current=nextProducts[index],imageChanged=incomingImage!==undefined&&asText(current?.imageUrl)!==incomingImage,changed=masterFields.some((field)=>asText(current?.[field])!==master[field])||asText(current?.barcode)!==master.supplierBarcode||imageChanged;if(changed){nextProducts[index]={...current,...master,imageUrl:incomingImage===undefined?normalizeImageUrl(current?.imageUrl):incomingImage,barcode:master.supplierBarcode,updatedAt:Date.now()};updated++;}else unchanged++;}
     processed++;
     if(processed%2000===0){const percent=70+Math.round(processed/Math.max(1,job.totalRows||processed)*16);updateMasterJob(job,{phase:"Đang hợp nhất Master Data",percent:Math.min(86,percent),processedRows:processed,totalRows:job.totalRows||processed});await yieldToServer();}
   }
@@ -793,8 +794,8 @@ app.get("/api/master-data/export.csv",async(req,res,next)=>{
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"';
     res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=MasterData_Fulfillment.csv","Cache-Control":"no-store"});
-    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"].map(csvCell).join(",")+"\n");
-    for(const product of state.products){const row=[product.sku,product.name,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.line,product.lineName].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
+    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME","IMAGE URL"].map(csvCell).join(",")+"\n");
+    for(const product of state.products){const row=[product.sku,product.name,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.line,product.lineName,product.imageUrl].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
     res.end();
   } catch(error){next(error);}
 });
@@ -848,8 +849,10 @@ app.post("/api/store", async (req, res, next) => {
         if(skuIndex>=0&&skuIndex!==idIndex)return fail("SKU đã tồn tại trong Master Data");
         const index=idIndex,existing=index>=0?state.products[index]:null,line=cleanLine(source.line);
         if(!defaultLineNames.has(line))return fail("Line phải từ 01 đến 28");
-        const supplierBarcode=asText(source.supplierBarcode)||asText(source.barcode);
-        const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:supplierBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price)),stock:0,loss:0,expDate:"",updatedAt:Date.now()};
+        const supplierBarcode=asText(source.supplierBarcode)||asText(source.barcode),hasImageField=Object.prototype.hasOwnProperty.call(source,"imageUrl"),rawImageUrl=asText(source.imageUrl),imageUrl=hasImageField?normalizeImageUrl(rawImageUrl):normalizeImageUrl(existing?.imageUrl);
+        if(hasImageField&&rawImageUrl.length>1_500_000)return fail("Ảnh sản phẩm tối đa 1 MB");
+        if(hasImageField&&rawImageUrl&&!imageUrl)return fail("Ảnh sản phẩm cần là URL http(s), đường dẫn nội bộ hoặc ảnh đã chọn hợp lệ");
+        const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:supplierBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price)),stock:existing?.stock??0,loss:existing?.loss??0,expDate:asText(existing?.expDate),imageUrl:hasImageField?imageUrl:normalizeImageUrl(existing?.imageUrl),updatedAt:Date.now()};
         if(index>=0) state.products[index]=product; else state.products.unshift(product);
         audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
       }

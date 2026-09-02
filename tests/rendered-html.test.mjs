@@ -188,8 +188,8 @@ try{
   assert.ok(fallbackResult.items.length>0);
   assert.ok(fallbackResult.items.every((item)=>item.stock>0&&item.productId!=="p3"));
 
-  const masterHeaders=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"];
-  const workbook=createXlsx([masterHeaders,["10531914","SẢN PHẨM CẬP NHẬT TỪ EXCEL","18","FOOD","1801","BEVERAGE","490000000001","18","TEA DRINKS"],["00000999","SẢN PHẨM MỚI","03","FOOD","0301","FRUIT","490000000002","03","FRUIT"]]);
+  const masterHeaders=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME","IMAGE URL"];
+  const workbook=createXlsx([masterHeaders,["10531914","SẢN PHẨM CẬP NHẬT TỪ EXCEL","18","FOOD","1801","BEVERAGE","490000000001","18","TEA DRINKS","https://cdn.example.com/p1.jpg"],["00000999","SẢN PHẨM MỚI","03","FOOD","0301","FRUIT","490000000002","03","FRUIT","https://cdn.example.com/new.jpg"]]);
   const masterForm=new FormData();
   masterForm.set("file",new Blob([workbook],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"master-data.xlsx");
   const masterResponse=await fetch(origin+"/api/master-data/import",{method:"POST",headers:{cookie:staffCookie},body:masterForm});
@@ -207,6 +207,7 @@ try{
   assert.equal(preserved.name,"SẢN PHẨM CẬP NHẬT TỪ EXCEL");
   assert.equal(preserved.supplierBarcode,"490000000001");
   assert.equal(preserved.line,"18");
+  assert.equal(preserved.imageUrl,"https://cdn.example.com/p1.jpg");
   assert.equal(preserved.stock,5);
   assert.equal(preserved.bay,3);
   assert.equal(preserved.price,450000);
@@ -216,7 +217,7 @@ try{
   assert.equal(afterMaster.products.length,4);
   assert.doesNotMatch(JSON.stringify(afterMaster),/passwordHash|tokenHash|sessions/);
   const importedProduct=afterMaster.products.find((item)=>item.sku==="00000999");
-  const editProduct=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"upsertProduct",product:{...importedProduct,name:"SẢN PHẨM ĐÃ SỬA"}})});
+  const editProduct=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"upsertProduct",product:{...importedProduct,name:"SẢN PHẨM ĐÃ SỬA",imageUrl:"https://cdn.example.com/manual.jpg"}})});
   assert.equal(editProduct.status,200);
   const deleteProduct=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"deleteProduct",id:importedProduct.id})});
   assert.equal(deleteProduct.status,200);
