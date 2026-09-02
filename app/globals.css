@@ -794,3 +794,17 @@ body{min-width:320px}
    long values stay readable through the existing title tooltip. */
 .pog-product-details dd{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal}
 .pog-product-details dd span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Keep the metadata label and value together when the tile has room,
+   e.g. “Tồn kho: 0” and “STT: 14”. */
+.pog-product-details dl>div,
+.pog-canvas-layout.pog-has-product .pog-product-details dl>div,
+.pog-canvas-layout.pog-search-expanded .pog-product-details dl>div{
+  display:grid!important;
+  grid-template-columns:max-content minmax(0,1fr)!important;
+  align-items:center;
+  gap:6px;
+}
+.pog-product-details dt{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pog-product-details dd{text-align:right}
+.pog-product-details dd span{text-align:inherit}
