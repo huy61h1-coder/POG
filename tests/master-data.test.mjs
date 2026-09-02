@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeMasterRecords, normalizeImageUrl, normalizeMasterProduct, parseMasterDataRows } from "../lib/master-data.mjs";
+import { mergeMasterRecords, normalizeImageUrl, normalizeMasterProduct, parseMasterDataRows, splitImageUrls } from "../lib/master-data.mjs";
 import { parseStockRows } from "../lib/stock-data.mjs";
 
 const headers=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"];
@@ -78,6 +78,22 @@ test("đọc cột link hình ảnh tùy chọn và lọc URL không hợp lệ"
   assert.equal(parsed.records[1].imageUrl,"");
   assert.equal(normalizeImageUrl("data:image/png;base64,AAAA"),"data:image/png;base64,AAAA");
   assert.equal(normalizeImageUrl("javascript:alert(1)"),"");
+});
+
+test("đọc nhiều link ảnh phân cách bằng | theo đúng thứ tự",()=>{
+  const first="https://storage.googleapis.com/aeonvietnam-spresso-public/FOODLINE%202024/MAR/01065848%20(2).PNG";
+  const second="https://storage.googleapis.com/aeonvietnam-spresso-public/FOODLINE%202024/MAR/01065848%20(1).PNG";
+  const third="https://storage.googleapis.com/aeonvietnam-spresso-public/FOODLINE%202024/MAR/01065848%20(3).PNG";
+  const value=`  ${first} | ${second} | javascript:alert(1) | ${first} | ftp://cdn.example.com/invalid.png | ${third}  `;
+  const expected=[first,second,third];
+  assert.deepEqual(splitImageUrls(value),expected);
+  assert.equal(normalizeImageUrl(value),expected.join("|"));
+
+  const parsed=parseMasterDataRows([
+    [...headers,"IMAGE URL"],
+    ["A1","Hàng nhiều ảnh","12","HOME","1201","HOUSEHOLD","123","Line 12","HOUSEHOLD",value],
+  ]);
+  assert.equal(parsed.records[0].imageUrl,expected.join("|"));
 });
 
 test("không nhập SKU trùng có nội dung mâu thuẫn",()=>{
