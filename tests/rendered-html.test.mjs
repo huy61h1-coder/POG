@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { strToU8, zipSync } from "fflate";
+import { strToU8, unzipSync, zipSync } from "fflate";
 
 const root=fileURLToPath(new URL("..",import.meta.url));
 const port=32000+(process.pid%1000);
@@ -246,6 +246,17 @@ try{
   assert.equal(clearAssigned.status,200);
   const historyStore=await (await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).json();
   assert.ok(historyStore.orderHistory.some((item)=>item.customerName==="Khách lịch sử"&&item.customerPhone==="0901234567"&&item.completedAt));
+  const exportMonth=new Date().toISOString().slice(0,7);
+  const orderExport=await fetch(origin+"/api/orders/export.xlsx?month="+exportMonth,{headers:{cookie:staffCookie}});
+  assert.equal(orderExport.status,200);
+  assert.match(orderExport.headers.get("content-type")||"",/spreadsheetml/);
+  assert.match(orderExport.headers.get("content-disposition")||"",/Don_soan_khach_hang_/);
+  const orderExportBytes=new Uint8Array(await orderExport.arrayBuffer());
+  assert.equal(orderExportBytes[0],0x50);
+  assert.equal(orderExportBytes[1],0x4b);
+  const orderWorkbook=unzipSync(orderExportBytes);
+  assert.ok(orderWorkbook["xl/worksheets/sheet1.xml"]);
+  assert.match(new TextDecoder().decode(orderWorkbook["xl/worksheets/sheet1.xml"]),/Khách lịch sử/);
   const disableManager=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:staffAccount.userId,active:false}})});
   assert.equal(disableManager.status,200);
   assert.equal((await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).status,200);

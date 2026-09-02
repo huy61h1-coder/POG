@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import { strToU8, zipSync } from "fflate";
 import { normalizeMasterProduct } from "./lib/master-data.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -140,6 +141,30 @@ function createSession(state,accountId) {
 function audit(state, actor, action) {
   state.logs.unshift({ id: randomUUID(), action, userId: actor.userId, userName: actor.name, createdAt: Date.now() });
   state.logs = state.logs.slice(0, 500);
+}
+function xmlEscape(value) {
+  return String(value??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+}
+function excelColumnName(index) {
+  let value="",number=index+1;
+  while(number>0){const remainder=(number-1)%26;value=String.fromCharCode(65+remainder)+value;number=Math.floor((number-1)/26);}
+  return value;
+}
+function createXlsx(rows) {
+  const sheetRows=rows.map((row,rowIndex)=>`<row r="${rowIndex+1}">${row.map((value,columnIndex)=>{
+    const ref=excelColumnName(columnIndex)+(rowIndex+1),numeric=typeof value==="number"&&Number.isFinite(value);
+    if(numeric)return `<c r="${ref}" t="n"><v>${value}</v></c>`;
+    const text=String(value??""),safe=/^[=+\-@]/.test(text)?"'"+text:text;
+    return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(safe)}</t></is></c>`;
+  }).join("")}</row>`).join("");
+  const files={
+    "[Content_Types].xml":`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
+    "_rels/.rels":`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    "xl/workbook.xml":`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Don soan" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels":`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+    "xl/worksheets/sheet1.xml":`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>`,
+  };
+  return zipSync(Object.fromEntries(Object.entries(files).map(([name,content])=>[name,strToU8(content)])),{level:6});
 }
 
 const aiRateWindows = new Map();
@@ -739,6 +764,27 @@ app.get("/api/stock/export.csv",async(req,res,next)=>{
     res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Department","Department Name","Division","Line","Line Name","Sales","Closing Stock"].map(csvCell).join(",")+"\n");
     for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku))||{},row=[record.sku,product.name,product.department,product.departmentName,product.division,product.line,product.lineName,record.sales,record.stock].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
     res.end();
+  } catch(error){next(error);}
+});
+
+app.get("/api/orders/export.xlsx",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const requestedMonth=asText(req.query.month),month=/^\d{4}-\d{2}$/.test(requestedMonth)?requestedMonth:localDateKey().slice(0,7),accountsById=new Map(state.accounts.map((account)=>[account.id,account])),productsById=new Map(state.products.map((product)=>[product.id,product]));
+    const headers=["Ngày đơn","Tên khách hàng","Số điện thoại","SKU","Barcode","Tên sản phẩm","Số lượng","Đã lấy","Trạng thái","Nhân viên nhận","Người gán","Line POG","Mặt","Vị trí POG","Ghi chú","Ngày hoàn tất"];
+    const rows=[headers];
+    const append=(item,completed)=>{
+      if(!canManage(actor.role)&&item.userId!==actor.userId)return;
+      const date=normalizeOrderDate(item.orderDate,item.createdAt||Date.now());if(!date.startsWith(month))return;
+      const product=productsById.get(item.productId);if(!product)return;
+      const assignee=accountsById.get(item.userId),barcode=product.barcode||product.supplierBarcode||"";
+      rows.push([date,asText(item.customerName,"Chưa đặt tên khách"),normalizePhone(item.customerPhone),product.sku,barcode,product.name,Math.max(1,asInt(item.quantity,1)),item.picked?"Có":"Chưa",""+ (completed?"Hoàn tất":"Đang soạn"),asText(assignee?.name,"Nhân viên đã xóa"),asText(item.assignedBy),product.line?"Line "+product.line+String(product.side||""):"Chưa gán POG",product.side||"",product.bay||"",asText(item.note),completed?localDateKey(item.completedAt||Date.now()):""]);
+    };
+    for(const item of state.picking)append(item,false);
+    for(const item of state.orderHistory)append(item,true);
+    rows.splice(1,rows.length-1,...rows.slice(1).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))||String(a[1]).localeCompare(String(b[1]))||String(a[3]).localeCompare(String(b[3]))));
+    const workbook=createXlsx(rows),filename=`Don_soan_khach_hang_${month}.xlsx`;
+    res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
   } catch(error){next(error);}
 });
 
