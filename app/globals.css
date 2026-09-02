@@ -742,14 +742,14 @@ body{min-width:320px}
 /* Keep the primary navigation available while long product tables or POG
    canvases are scrolled. The shell offset prevents content from hiding under
    the fixed bar at each responsive breakpoint. */
-.ops-topbar{position:fixed;top:0;left:0;right:0;z-index:120}
+.ops-topbar{position:fixed;top:0;left:0;right:0;z-index:70}
 .ops-shell{padding-top:76px}
-.global-search>.barcode-trigger{display:grid;place-items:center;min-width:34px;min-height:34px;padding:0;border:1px solid color-mix(in srgb,var(--brand) 18%,var(--line));box-shadow:0 2px 6px color-mix(in srgb,var(--brand) 10%,transparent);transition:background .16s,color .16s,border-color .16s,transform .16s}
+.global-search>.barcode-trigger{display:grid;place-items:center;width:36px;height:36px;min-width:36px;min-height:36px;padding:0;border:0;border-radius:8px;background:var(--brand);color:#fff;box-shadow:0 3px 9px color-mix(in srgb,var(--brand) 20%,transparent);transition:background .16s,color .16s,border-color .16s,transform .16s}
 .global-search>.barcode-trigger svg{width:19px;height:19px}
 .global-search>.barcode-trigger:focus-visible{outline:3px solid color-mix(in srgb,var(--brand) 28%,transparent);outline-offset:2px}
-.global-search>.barcode-trigger:hover{transform:translateY(-1px)}
+.global-search>.barcode-trigger:hover{background:var(--brand2);color:#fff;transform:translateY(-1px)}
 @media(max-width:1150px){.ops-shell{padding-top:70px}}
-@media(max-width:800px){.ops-shell{padding-top:65px}.global-search>.barcode-trigger{min-width:32px;min-height:32px}.global-search>.barcode-trigger svg{width:18px;height:18px}}
+@media(max-width:800px){.ops-shell{padding-top:65px}.global-search>.barcode-trigger{width:34px;height:34px;min-width:34px;min-height:34px;border-radius:7px}.global-search>.barcode-trigger svg{width:18px;height:18px}}
 
 /* Selected POG product: give the product photo the full card width and keep
    the metadata compact so the shelf image remains the visual focus. */
