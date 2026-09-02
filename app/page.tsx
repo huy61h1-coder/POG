@@ -237,7 +237,11 @@ function StockBadge({stock,known=true}:{stock:number;known?:boolean}) {
 }
 
 function BarcodeIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M3 4v16M6 4v16M9 7v10M12 4v16M15 4v16M18 7v10M21 4v16"/></svg>;
+  return <svg viewBox="0 0 28 28" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 9V5h4M24 9V5h-4M4 19v4h4M24 19v4h-4"/>
+    <path d="M8 9v10M10.5 7v14M13 10v8M16 7v14M18.5 10v8M21 7v14"/>
+    <path d="M7 14h14" strokeWidth="1.2" opacity=".45"/>
+  </svg>;
 }
 
 function BarcodeScannerModal({onClose,onDetected,onError}:{onClose:()=>void;onDetected:(value:string)=>void;onError:(message:string)=>void}) {
