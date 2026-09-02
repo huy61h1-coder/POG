@@ -19,6 +19,16 @@ test("đọc Stock theo tên cột mới dù Sale và Stock đứng giữa bản
     ["A1","Sữa tươi",12,5,10000,8000,"10","FOOD","1001","DAIRY","NCC-1","AEON-1"],
   ]);
   assert.deepEqual(parsed.records,[{sku:"A1",stock:5,sales:12}]);
+  assert.deepEqual(parsed.stockMetadata,[{sku:"A1",name:"Sữa tươi",division:"10",divisionName:"FOOD",department:"1001",departmentName:"DAIRY"}]);
+});
+
+test("đọc đúng cấu trúc Stock 8 cột chuẩn",()=>{
+  const parsed=parseStockRows([
+    ["SKU","TÊN SẢN PHẨM","Sale","Stock","Division","DIVISION NAME","Department","DEPARTMENT NAME"],
+    ["A1","Sữa tươi",12,5,"10","FOOD","1001","DAIRY"],
+  ]);
+  assert.deepEqual(parsed.records,[{sku:"A1",stock:5,sales:12}]);
+  assert.deepEqual(parsed.stockMetadata,[{sku:"A1",name:"Sữa tươi",division:"10",divisionName:"FOOD",department:"1001",departmentName:"DAIRY"}]);
 });
 
 test("đọc đúng 9 cột Master Data và chuẩn hóa Line",()=>{
