@@ -739,6 +739,30 @@ body{min-width:320px}
   .panel-title{padding-inline:12px}
 }
 
+/* Selected POG product: give the product photo the full card width and keep
+   the metadata compact so the shelf image remains the visual focus. */
+.pog-product-details>header{position:relative;display:block}
+.pog-product-details>header>.badge{position:absolute;top:0;right:0;z-index:1}
+.pog-product-summary{display:flex;flex-direction:column;align-items:stretch;gap:7px;width:100%;padding-right:0}
+.pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{width:100%;height:118px}
+.pog-product-summary>div:last-child{min-width:0;padding-right:76px}
+.pog-product-details>header h3{font-size:13px;line-height:1.22}
+.pog-product-details dl{gap:5px;margin-top:9px}
+.pog-product-details dl>div{min-height:34px;padding:6px 8px;gap:8px}
+.pog-product-details dt{font-size:7px}
+.pog-product-details dd{font-size:9px;line-height:1.2}
+.pog-product-details .pog-detail-stock dd{font-size:11px}
+@media(max-width:800px){
+  .pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:132px}
+  .pog-product-summary>div:last-child{padding-right:82px}
+  .pog-product-details>header h3{font-size:12px}
+  .pog-product-details dl{gap:5px;margin-top:8px}
+  .pog-product-details dl>div{min-height:0;padding:6px 7px}
+  .pog-product-details dt{font-size:7px}
+  .pog-product-details dd{font-size:8px}
+  .pog-product-details .pog-detail-stock dd{font-size:10px}
+}
+
 /* Keep desktop navigation visible while the main content scrolls. Grid items
    stretch by default, so align-self:start lets sticky stay viewport-anchored. */
 @media(min-width:801px){
