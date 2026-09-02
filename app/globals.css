@@ -765,19 +765,19 @@ body{min-width:320px}
 
 /* Use a taller contain box so tall packshots are not clipped; compress the
    data tiles below it to keep the selected-product card balanced. */
-.pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:clamp(170px,24vw,250px)}
+.pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:clamp(155px,22vw,220px)}
 .pog-product-image img{object-fit:contain;object-position:center}
 .pog-product-details dl{gap:4px;margin-top:7px}
-.pog-product-details dl>div{min-height:28px;padding:4px 7px;gap:7px}
+.pog-product-details dl>div{min-height:24px;padding:3px 6px;gap:6px}
 .pog-product-details dt{font-size:6.5px}
-.pog-product-details dd{font-size:8px;line-height:1.15}
+.pog-product-details dd{font-size:7.5px;line-height:1.1}
 .pog-product-details .pog-detail-stock dd{font-size:10px}
 @media(max-width:800px){
-  .pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:clamp(170px,42vw,250px)}
+  .pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:clamp(155px,38vw,220px)}
   .pog-product-details dl{gap:4px;margin-top:7px}
-  .pog-product-details dl>div{padding:4px 6px}
+  .pog-product-details dl>div{min-height:23px;padding:3px 5px;gap:5px}
   .pog-product-details dt{font-size:6.5px}
-  .pog-product-details dd{font-size:8px}
+  .pog-product-details dd{font-size:7.5px;line-height:1.08}
 }
 
 /* Keep desktop navigation visible while the main content scrolls. Grid items
