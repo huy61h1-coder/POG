@@ -238,6 +238,14 @@ try{
   const compactAfterBulk=await (await fetch(origin+"/api/store",{headers:{cookie}})).json();
   assert.equal(compactAfterBulk.products.length,0);
   assert.equal(compactAfterBulk.productTotal,12003);
+  const assignForCustomer=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"assignPick",productId:"p1",assigneeId:staffAccount.userId,quantity:1,customerName:"Khách lịch sử",customerPhone:"0901 234 567",note:"Giao buổi chiều"})});
+  assert.equal(assignForCustomer.status,200);
+  const assignedStore=await (await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).json();
+  assert.ok(assignedStore.assignedPicking.some((item)=>item.customerName==="Khách lịch sử"&&item.customerPhone==="0901234567"));
+  const clearAssigned=await fetch(origin+"/api/store",{method:"POST",headers:{"content-type":"application/json",cookie:staffCookie},body:JSON.stringify({action:"clearPick"})});
+  assert.equal(clearAssigned.status,200);
+  const historyStore=await (await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).json();
+  assert.ok(historyStore.orderHistory.some((item)=>item.customerName==="Khách lịch sử"&&item.customerPhone==="0901234567"&&item.completedAt));
   const disableManager=await fetch(origin+"/api/store",{method:"POST",headers,body:JSON.stringify({action:"updateAccount",account:{userId:staffAccount.userId,active:false}})});
   assert.equal(disableManager.status,200);
   assert.equal((await fetch(origin+"/api/store",{headers:{cookie:staffCookie}})).status,200);
