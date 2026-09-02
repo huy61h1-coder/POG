@@ -419,7 +419,10 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
 @media(max-width:520px){.order-day-divider{margin-top:8px}.order-day-divider b{font-size:10px}.order-day-divider span{font-size:8px}.customer-order-header{align-items:flex-start;flex-direction:column;gap:8px}.customer-order-header>strong{align-self:stretch;justify-content:space-between}.assigned-orders>article,.order-history-panel>article{padding-left:12px;padding-right:12px}.customer-order-items>div{grid-template-columns:18px minmax(0,1fr)}.customer-order-items strong{grid-column:2;font-size:9px}.order-history-toolbar{align-items:stretch;flex-direction:column}.order-history-toolbar button{width:100%}.order-assignment-hint{margin:0 20px 5px}}
 
 /* Order compose: a focused, responsive workspace for desktop and touch screens. */
-.order-page{width:100%;max-width:1540px;margin:0 auto}
+.order-page{width:100%;max-width:1800px;margin:0 auto}
+.order-top-panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:16px;margin:0 0 18px}
+.order-top-panels .assigned-orders,.order-top-panels .order-history-panel{min-width:0;margin-top:0}
+.order-top-panels .empty{padding:22px 16px}
 .order-page>.page-head{margin-bottom:18px}
 .order-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:-2px 0 18px}
 .order-summary article{min-width:0;min-height:92px;padding:14px 16px;border:1px solid color-mix(in srgb,var(--line) 80%,#fff);border-radius:15px;background:linear-gradient(145deg,#fff,var(--surface-muted));box-shadow:0 7px 18px rgba(62,30,48,.045);display:flex;flex-direction:column;justify-content:center;gap:3px}
@@ -462,7 +465,12 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
   .order-page .order-history-toolbar{grid-template-columns:minmax(180px,1.3fr) repeat(2,minmax(130px,1fr)) auto auto;gap:8px;padding-left:13px;padding-right:13px}
 }
 
-@media(max-width:900px){
+@media(max-width:1180px){
+  .order-top-panels{grid-template-columns:1fr;gap:12px}
+}
+
+@media(max-width:800px){
+  .order-top-panels{gap:10px;margin-bottom:14px}
   .order-page>.page-head{margin-bottom:16px}
   .order-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:14px}
   .order-summary article{min-height:76px;padding:11px 12px;border-radius:13px}
