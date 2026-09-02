@@ -789,3 +789,8 @@ body{min-width:320px}
 @media(min-width:801px) and (max-width:1199px){
   .side-nav{top:68px;height:calc(100vh - 68px)}
 }
+
+/* Keep compact POG metadata on one line whenever the tile can accommodate it;
+   long values stay readable through the existing title tooltip. */
+.pog-product-details dd{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal}
+.pog-product-details dd span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
