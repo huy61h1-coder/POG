@@ -2,7 +2,6 @@ import express from "express";
 import multer from "multer";
 import { Pool } from "pg";
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
-import { once } from "node:events";
 import { createReadStream, existsSync, mkdirSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -759,14 +758,13 @@ app.get("/api/stock", async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
-app.get("/api/stock/export.csv",async(req,res,next)=>{
+app.get(["/api/stock/export.xlsx","/api/stock/export.csv"],async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"',productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
-    res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=Stock_Fulfillment.csv","Cache-Control":"no-store"});
-    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Sale","Stock","Division","DIVISION NAME","Department","DEPARTMENT NAME"].map(csvCell).join(",")+"\n");
-    for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku))||{},row=[record.sku,asText(record.name)||product.name,record.sales,record.stock,asText(record.division)||product.division,asText(record.divisionName)||product.divisionName,asText(record.department)||product.department,asText(record.departmentName)||product.departmentName].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
-    res.end();
+    const productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product])),rows=[["SKU","TÊN SẢN PHẨM","Sale","Stock","Division","DIVISION NAME","Department","DEPARTMENT NAME"]];
+    for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku))||{};rows.push([record.sku,asText(record.name)||product.name||"",record.sales,record.stock,asText(record.division)||product.division||"",asText(record.divisionName)||product.divisionName||"",asText(record.department)||product.department||"",asText(record.departmentName)||product.departmentName||""]);}
+    const workbook=createXlsx(rows);
+    res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":"attachment; filename=Stock_Fulfillment.xlsx","Cache-Control":"no-store"}).send(Buffer.from(workbook));
   } catch(error){next(error);}
 });
 
@@ -791,15 +789,14 @@ app.get("/api/orders/export.xlsx",async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
-app.get("/api/master-data/export.csv",async(req,res,next)=>{
+app.get(["/api/master-data/export.xlsx","/api/master-data/export.csv"],async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"';
-    res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=MasterData_Fulfillment.csv","Cache-Control":"no-store"});
     const uploaded=stockIndex(state.stockRecords);
-    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Sale","Stock","GIÁ BÁN RETAIL","GIÁ KHUYẾN MÃI","Division","DIVISION NAME","Department","DEPARTMENT NAME","BARCODE NCC","BARCODE AEON","IMAGE URL"].map(csvCell).join(",")+"\n");
-    for(const product of state.products){const record=uploaded.get(normalizeText(product.sku)),row=[product.sku,product.name,record?.sales??product.sales??0,record?.stock??product.stock??0,product.price??0,product.promoPrice??0,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.barcode||product.supplierBarcode,product.imageUrl].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
-    res.end();
+    const rows=[["SKU","TÊN SẢN PHẨM","Sale","Stock","GIÁ BÁN RETAIL","GIÁ KHUYẾN MÃI","Division","DIVISION NAME","Department","DEPARTMENT NAME","BARCODE NCC","BARCODE AEON","IMAGE URL"]];
+    for(const product of state.products){const record=uploaded.get(normalizeText(product.sku));rows.push([product.sku,product.name,record?.sales??product.sales??0,record?.stock??product.stock??0,product.price??0,product.promoPrice??0,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.barcode||product.supplierBarcode,product.imageUrl]);}
+    const workbook=createXlsx(rows);
+    res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":"attachment; filename=MasterData_Fulfillment.xlsx","Cache-Control":"no-store"}).send(Buffer.from(workbook));
   } catch(error){next(error);}
 });
 

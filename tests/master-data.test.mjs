@@ -13,6 +13,17 @@ test("đọc định dạng chuẩn mới không cần gán Line trước khi c�
   assert.deepEqual(parsed.records[0],{sku:"A1",name:"Sữa tươi",division:"10",divisionName:"FOOD",department:"1001",departmentName:"DAIRY",supplierBarcode:"NCC-1",sales:"12",stock:"5",price:"10000",promoPrice:"8000",barcode:"AEON-1"});
 });
 
+test("nhận tiêu đề Master Data có ký tự ẩn hoặc viết liền",()=>{
+  const parsed=parseMasterDataRows([
+    ["\uFEFFSKU","TÊN\u200B SẢN PHẨM","Sale","Stock","GIÁ BÁN RETAIL","GIÁ KHUYẾN MÃI","Division","DIVISIONNAME","Department","DEPARTMENTNAME","BARCODENCC","BARCODEAEON","IMAGEURL"],
+    ["A1","Sữa tươi",12,5,10000,8000,"10","FOOD","1001","DAIRY","NCC-1","AEON-1","https://cdn.example.com/a.jpg"],
+  ]);
+  assert.equal(parsed.records[0].divisionName,"FOOD");
+  assert.equal(parsed.records[0].departmentName,"DAIRY");
+  assert.equal(parsed.records[0].supplierBarcode,"NCC-1");
+  assert.equal(parsed.records[0].imageUrl,"https://cdn.example.com/a.jpg");
+});
+
 test("đọc Stock theo tên cột mới dù Sale và Stock đứng giữa bảng",()=>{
   const parsed=parseStockRows([
     ["SKU","Tên sản phẩm","Sale","Stock","Giá bán retail","Giá khuyến mãi","Division","Division Name","Department","Department Name","Barcode NCC","Barcode AEON"],
