@@ -621,6 +621,9 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
 
 /* Read-only product details: open from any product image/name or POG result. */
 .product-table-image-button{display:block;padding:0;border:0;background:transparent;cursor:pointer}
+.product-row-clickable{cursor:pointer}
+.product-row-clickable:hover>td{background:#fff8fc}
+.product-row-clickable:focus-visible{outline:2px solid var(--brand);outline-offset:-2px}
 .product-table-image-button:focus-visible,.product-name-button:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:8px}
 .product-name-button{display:inline-block;max-width:100%;padding:3px 5px;margin:-3px -5px;border:0;border-radius:6px;background:transparent;color:var(--ink);font:inherit;font-weight:800;text-align:left;cursor:pointer}
 .product-name-button:hover{color:var(--brand);background:var(--accent)}
