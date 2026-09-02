@@ -791,9 +791,9 @@ body{min-width:320px}
 }
 
 /* Keep compact POG metadata on one line whenever the tile can accommodate it;
-   long values stay readable through the existing title tooltip. */
-.pog-product-details dd{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal}
-.pog-product-details dd span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+   values that do not fit can wrap to a maximum of two readable lines. */
+.pog-product-details dd{white-space:normal;overflow:hidden;text-overflow:clip;overflow-wrap:anywhere}
+.pog-product-details dd span{display:-webkit-box;overflow:hidden;text-overflow:clip;white-space:normal;overflow-wrap:anywhere;-webkit-box-orient:vertical;-webkit-line-clamp:2}
 
 /* Keep the metadata label and value together when the tile has room,
    e.g. “Tồn kho: 0” and “STT: 14”. */
