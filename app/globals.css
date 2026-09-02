@@ -763,6 +763,23 @@ body{min-width:320px}
   .pog-product-details .pog-detail-stock dd{font-size:10px}
 }
 
+/* Use a taller contain box so tall packshots are not clipped; compress the
+   data tiles below it to keep the selected-product card balanced. */
+.pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:clamp(170px,24vw,250px)}
+.pog-product-image img{object-fit:contain;object-position:center}
+.pog-product-details dl{gap:4px;margin-top:7px}
+.pog-product-details dl>div{min-height:28px;padding:4px 7px;gap:7px}
+.pog-product-details dt{font-size:6.5px}
+.pog-product-details dd{font-size:8px;line-height:1.15}
+.pog-product-details .pog-detail-stock dd{font-size:10px}
+@media(max-width:800px){
+  .pog-product-image,.pog-canvas-layout.pog-has-product .pog-product-image{height:clamp(170px,42vw,250px)}
+  .pog-product-details dl{gap:4px;margin-top:7px}
+  .pog-product-details dl>div{padding:4px 6px}
+  .pog-product-details dt{font-size:6.5px}
+  .pog-product-details dd{font-size:8px}
+}
+
 /* Keep desktop navigation visible while the main content scrolls. Grid items
    stretch by default, so align-self:start lets sticky stay viewport-anchored. */
 @media(min-width:801px){
