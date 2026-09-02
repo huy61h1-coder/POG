@@ -202,7 +202,7 @@ function stockIndex(records) {
 }
 function withUploadedStock(product,index) {
   const record=index.get(normalizeText(product.sku));
-  return {...product,stock:record?.stock||0,stockKnown:Boolean(record),loss:0,expDate:""};
+  return {...product,stock:record?.stock??0,sales:record?.sales??product.sales??0,stockKnown:Boolean(record),loss:0,expDate:""};
 }
 function manualCheckGroups(state) {
   const productsById=new Map(state.products.map((product)=>[product.id,product])),uploaded=stockIndex(state.stockRecords);
@@ -559,7 +559,6 @@ async function runStockJob(job) {
   finally { await Promise.allSettled([fs.unlink(job.filePath),fs.unlink(resultPath),fs.unlink(resultPath+".part")]); }
 }
 
-const masterFields=["sku","name","division","divisionName","department","departmentName","supplierBarcode","line","lineName"];
 const yieldToServer=()=>new Promise((resolve)=>setImmediate(resolve));
 async function mergeMasterResultFile(products,resultPath,job) {
   const nextProducts=products.slice(),indexBySku=new Map();
@@ -573,11 +572,14 @@ async function mergeMasterResultFile(products,resultPath,job) {
     if(!line)continue;
     if(!metadata){metadata=JSON.parse(line);continue;}
     const source=JSON.parse(line),sku=asText(source.sku),key=sku.toUpperCase();if(!key)continue;
-    const rawImage=asText(source.imageUrl),incomingImage=source.imageUrl===undefined||!rawImage?undefined:normalizeImageUrl(rawImage),master={sku,name:asText(source.name),division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode:asText(source.supplierBarcode),line:cleanLine(source.line),lineName:asText(source.lineName)};
+    const rawImage=asText(source.imageUrl),incomingImage=source.imageUrl===undefined||!rawImage?undefined:normalizeImageUrl(rawImage),master={sku,name:asText(source.name),division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode:asText(source.supplierBarcode)||asText(source.barcode),barcode:asText(source.barcode)||asText(source.supplierBarcode)};
+    if(source.line!==undefined)master.line=asText(source.line)?cleanLine(source.line):"";
+    if(source.lineName!==undefined)master.lineName=asText(source.lineName);
+    for(const field of ["price","promoPrice","sales"]){if(source[field]!==undefined&&asText(source[field])!=="")master[field]=Math.max(0,asInt(String(source[field]).replace(/,/g,"")));}
     if(incomingImage!==undefined)master.imageUrl=incomingImage;
     const index=indexBySku.get(key);
-    if(index===undefined){indexBySku.set(key,nextProducts.length);nextProducts.push({...master,id:randomUUID(),barcode:master.supplierBarcode,side:"A",bay:1,price:0,stock:0,loss:0,expDate:"",imageUrl:incomingImage||"",updatedAt:Date.now()});created++;}
-    else {const current=nextProducts[index],imageChanged=incomingImage!==undefined&&asText(current?.imageUrl)!==incomingImage,changed=masterFields.some((field)=>asText(current?.[field])!==master[field])||asText(current?.barcode)!==master.supplierBarcode||imageChanged;if(changed){nextProducts[index]={...current,...master,imageUrl:incomingImage===undefined?normalizeImageUrl(current?.imageUrl):incomingImage,barcode:master.supplierBarcode,updatedAt:Date.now()};updated++;}else unchanged++;}
+    if(index===undefined){indexBySku.set(key,nextProducts.length);nextProducts.push({...master,id:randomUUID(),line:master.line??"",lineName:master.lineName??"",price:master.price??0,promoPrice:master.promoPrice??0,sales:master.sales??0,stock:0,loss:0,expDate:"",side:"A",bay:1,imageUrl:incomingImage||"",updatedAt:Date.now()});created++;}
+    else {const current=nextProducts[index],imageChanged=incomingImage!==undefined&&asText(current?.imageUrl)!==incomingImage,changed=Object.keys(master).some((field)=>asText(current?.[field])!==master[field])||imageChanged;if(changed){nextProducts[index]={...current,...master,imageUrl:incomingImage===undefined?normalizeImageUrl(current?.imageUrl):incomingImage,updatedAt:Date.now()};updated++;}else unchanged++;}
     processed++;
     if(processed%2000===0){const percent=70+Math.round(processed/Math.max(1,job.totalRows||processed)*16);updateMasterJob(job,{phase:"Đang hợp nhất Master Data",percent:Math.min(86,percent),processedRows:processed,totalRows:job.totalRows||processed});await yieldToServer();}
   }
@@ -752,7 +754,7 @@ app.get("/api/stock", async(req,res,next)=>{
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const query=normalizeText(asText(req.query.q).slice(0,200)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize,cacheKey=[query,page,pageSize,asInt(state.stockImport?.updatedAt,0)].join("|"),apiCache=getStockApiCache(state.stockRecords),cached=apiCache.get(cacheKey);if(cached)return res.set("Cache-Control","no-store").json(cached);
     const bySku=stockIndex(state.stockRecords),productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
-    const rows=[];for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku)),row={...(product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),stock:record.stock,stockKnown:true,updatedAt:record.updatedAt};if(!query||productSearchText(row).includes(query))rows.push(row);}
+    const rows=[];for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku)),row={...(product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),sales:record.sales??0,stock:record.stock,stockKnown:true,updatedAt:record.updatedAt};if(!query||productSearchText(row).includes(query))rows.push(row);}
     rows.sort((a,b)=>a.sku.localeCompare(b.sku));const payload={products:rows.slice(start,start+pageSize),total:rows.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!productsBySku.has(normalizeText(row.sku))).length};if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);res.set("Cache-Control","no-store").json(payload);
   } catch(error){next(error);}
 });
@@ -762,8 +764,8 @@ app.get("/api/stock/export.csv",async(req,res,next)=>{
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"',productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
     res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=Stock_Fulfillment.csv","Cache-Control":"no-store"});
-    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Department","Department Name","Division","Line","Line Name","Sales","Closing Stock"].map(csvCell).join(",")+"\n");
-    for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku))||{},row=[record.sku,product.name,product.department,product.departmentName,product.division,product.line,product.lineName,record.sales,record.stock].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
+    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Sale","Stock","GIÁ BÁN RETAIL","GIÁ KHUYẾN MÃI","Division","DIVISION NAME","Department","DEPARTMENT NAME","BARCODE NCC","BARCODE AEON"].map(csvCell).join(",")+"\n");
+    for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku))||{},row=[record.sku,product.name,record.sales,record.stock,product.price??0,product.promoPrice??0,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.barcode||product.supplierBarcode].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
     res.end();
   } catch(error){next(error);}
 });
@@ -794,8 +796,9 @@ app.get("/api/master-data/export.csv",async(req,res,next)=>{
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const csvCell=(value)=>'"'+String(value??"").replace(/"/g,'""')+'"';
     res.set({"Content-Type":"text/csv; charset=utf-8","Content-Disposition":"attachment; filename=MasterData_Fulfillment.csv","Cache-Control":"no-store"});
-    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME","IMAGE URL"].map(csvCell).join(",")+"\n");
-    for(const product of state.products){const row=[product.sku,product.name,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.line,product.lineName,product.imageUrl].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
+    const uploaded=stockIndex(state.stockRecords);
+    res.write("\uFEFF"+["SKU","TÊN SẢN PHẨM","Sale","Stock","GIÁ BÁN RETAIL","GIÁ KHUYẾN MÃI","Division","DIVISION NAME","Department","DEPARTMENT NAME","BARCODE NCC","BARCODE AEON","IMAGE URL"].map(csvCell).join(",")+"\n");
+    for(const product of state.products){const record=uploaded.get(normalizeText(product.sku)),row=[product.sku,product.name,record?.sales??product.sales??0,record?.stock??product.stock??0,product.price??0,product.promoPrice??0,product.division,product.divisionName,product.department,product.departmentName,product.supplierBarcode,product.barcode||product.supplierBarcode,product.imageUrl].map(csvCell).join(",")+"\n";if(!res.write(row))await once(res,"drain");}
     res.end();
   } catch(error){next(error);}
 });
@@ -849,10 +852,10 @@ app.post("/api/store", async (req, res, next) => {
         if(skuIndex>=0&&skuIndex!==idIndex)return fail("SKU đã tồn tại trong Master Data");
         const index=idIndex,existing=index>=0?state.products[index]:null,line=cleanLine(source.line);
         if(!defaultLineNames.has(line))return fail("Line phải từ 01 đến 28");
-        const supplierBarcode=asText(source.supplierBarcode)||asText(source.barcode),hasImageField=Object.prototype.hasOwnProperty.call(source,"imageUrl"),rawImageUrl=asText(source.imageUrl),imageUrl=hasImageField?normalizeImageUrl(rawImageUrl):normalizeImageUrl(existing?.imageUrl);
+        const supplierBarcode=asText(source.supplierBarcode)||asText(existing?.supplierBarcode)||asText(source.barcode),aeonBarcode=asText(source.barcode)||asText(existing?.barcode)||supplierBarcode,promoPrice=Math.max(0,asInt(source.promoPrice,existing?.promoPrice||0)),hasImageField=Object.prototype.hasOwnProperty.call(source,"imageUrl"),rawImageUrl=asText(source.imageUrl),imageUrl=hasImageField?normalizeImageUrl(rawImageUrl):normalizeImageUrl(existing?.imageUrl);
         if(hasImageField&&rawImageUrl.length>1_500_000)return fail("Ảnh sản phẩm tối đa 1 MB");
         if(hasImageField&&rawImageUrl&&!imageUrl)return fail("Ảnh sản phẩm cần là URL http(s), đường dẫn nội bộ hoặc ảnh đã chọn hợp lệ");
-        const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:supplierBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price)),stock:existing?.stock??0,loss:existing?.loss??0,expDate:asText(existing?.expDate),imageUrl:hasImageField?imageUrl:normalizeImageUrl(existing?.imageUrl),updatedAt:Date.now()};
+        const product={...existing,id:requestedId||existing?.id||randomUUID(),sku,name,division:asText(source.division),divisionName:asText(source.divisionName),department:asText(source.department),departmentName:asText(source.departmentName),supplierBarcode,barcode:aeonBarcode,line,lineName:asText(source.lineName)||defaultLineNames.get(line)||"",side:asText(source.side,"A")==="B"?"B":"A",bay:Math.max(1,asInt(source.bay,1)),price:Math.max(0,asInt(source.price,existing?.price||0)),promoPrice,stock:existing?.stock??0,loss:existing?.loss??0,expDate:asText(existing?.expDate),imageUrl:hasImageField?imageUrl:normalizeImageUrl(existing?.imageUrl),updatedAt:Date.now()};
         if(index>=0) state.products[index]=product; else state.products.unshift(product);
         audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
       }

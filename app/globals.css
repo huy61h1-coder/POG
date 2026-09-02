@@ -526,7 +526,15 @@ html,body{background:linear-gradient(135deg,#fbf9fa 0%,#f6f3f5 48%,#faf6f9 100%)
 .product-image-tools>img{width:60px;height:60px;order:3;object-fit:contain;border:1px solid var(--line);border-radius:9px;background:#fff}
 .product-image-tools>span{min-width:180px;flex:1;color:var(--muted);font-size:9px;line-height:1.4}
 .product-modal .form-note{margin-bottom:2px}
+/* The standardized Master/Stock order adds pricing and both barcode fields.
+   Keep the desktop table readable while retaining horizontal scrolling on
+   narrow screens (the existing mobile card layout still applies). */
+.master-table{min-width:2200px}
+.master-table th:nth-child(3),.master-table td:nth-child(3){min-width:270px;white-space:normal}
+.master-table th:nth-child(4),.master-table td:nth-child(4),.master-table th:nth-child(5),.master-table td:nth-child(5),.master-table th:nth-child(6),.master-table td:nth-child(6),.master-table th:nth-child(7),.master-table td:nth-child(7){min-width:118px}
+.master-table th:nth-child(8),.master-table td:nth-child(8),.master-table th:nth-child(9),.master-table td:nth-child(9),.master-table th:nth-child(10),.master-table td:nth-child(10),.master-table th:nth-child(11),.master-table td:nth-child(11),.master-table th:nth-child(12),.master-table td:nth-child(12),.master-table th:nth-child(13),.master-table td:nth-child(13){min-width:138px}
 @media(max-width:800px){
+  .master-table{min-width:0}
   .master-table th:nth-child(3),.master-table td:nth-child(3){min-width:0}
   .master-table th:first-child,.master-table td:first-child{width:auto;min-width:0}
   .product-table-image{width:42px;height:42px}

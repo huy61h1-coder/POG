@@ -1,8 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeMasterRecords, normalizeImageUrl, normalizeMasterProduct, parseMasterDataRows } from "../lib/master-data.mjs";
+import { parseStockRows } from "../lib/stock-data.mjs";
 
 const headers=["SKU","TÊN SẢN PHẨM","Division","DIVISION NAME","Department","DEPARTMENT","SUPPLIER BARCODE","Line","LINE NAME"];
+
+test("đọc định dạng chuẩn mới không cần gán Line trước khi có POG",()=>{
+  const parsed=parseMasterDataRows([
+    ["SKU","Tên sản phẩm","Sale","Stock","Giá bán retail","Giá khuyến mãi","Division","Division Name","Department","Department Name","Barcode NCC","Barcode AEON"],
+    ["A1","Sữa tươi",12,5,10000,8000,"10","FOOD","1001","DAIRY","NCC-1","AEON-1"],
+  ]);
+  assert.deepEqual(parsed.records[0],{sku:"A1",name:"Sữa tươi",division:"10",divisionName:"FOOD",department:"1001",departmentName:"DAIRY",supplierBarcode:"NCC-1",sales:"12",stock:"5",price:"10000",promoPrice:"8000",barcode:"AEON-1"});
+});
+
+test("đọc Stock theo tên cột mới dù Sale và Stock đứng giữa bảng",()=>{
+  const parsed=parseStockRows([
+    ["SKU","Tên sản phẩm","Sale","Stock","Giá bán retail","Giá khuyến mãi","Division","Division Name","Department","Department Name","Barcode NCC","Barcode AEON"],
+    ["A1","Sữa tươi",12,5,10000,8000,"10","FOOD","1001","DAIRY","NCC-1","AEON-1"],
+  ]);
+  assert.deepEqual(parsed.records,[{sku:"A1",stock:5,sales:12}]);
+});
 
 test("đọc đúng 9 cột Master Data và chuẩn hóa Line",()=>{
   const parsed=parseMasterDataRows([
