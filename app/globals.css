@@ -792,6 +792,40 @@ body{min-width:320px}
   .pog-product-details dd{font-size:7.5px;line-height:1.08}
 }
 
+/* Mobile POG detail: keep the product photo compact so more of the shelf
+   remains visible, and fit the metadata into three balanced columns. Values
+   still wrap to two lines when a label or value is longer than its tile. */
+@media(max-width:800px){
+  .pog-product-image,
+  .pog-canvas-layout.pog-has-product .pog-product-image{
+    height:clamp(130px,32vw,185px);
+  }
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details dl,
+  .pog-canvas-layout.pog-search-expanded>.pog-mobile-results>.pog-product-details dl{
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:4px;
+  }
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details dl>div,
+  .pog-canvas-layout.pog-search-expanded>.pog-mobile-results>.pog-product-details dl>div{
+    min-height:0;
+    padding:5px 4px;
+    gap:3px;
+  }
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details dt,
+  .pog-canvas-layout.pog-search-expanded>.pog-mobile-results>.pog-product-details dt{
+    font-size:6px;
+  }
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details dd,
+  .pog-canvas-layout.pog-search-expanded>.pog-mobile-results>.pog-product-details dd{
+    font-size:7px;
+    line-height:1.08;
+  }
+  .pog-canvas-layout>.pog-mobile-results>.pog-product-details .pog-detail-stock dd,
+  .pog-canvas-layout.pog-search-expanded>.pog-mobile-results>.pog-product-details .pog-detail-stock dd{
+    font-size:9px;
+  }
+}
+
 /* Keep desktop navigation visible while the main content scrolls. Grid items
    stretch by default, so align-self:start lets sticky stay viewport-anchored. */
 @media(min-width:801px){
