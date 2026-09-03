@@ -48,6 +48,7 @@
 
 /* POG detail: product search stays left and the saved shelf image stays right. */
 .pog-body{grid-template-columns:minmax(300px,.85fr) minmax(0,1.4fr)}
+.pog-modal{position:relative}.pog-upload-overlay{position:absolute;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:9px;background:rgba(255,255,255,.84);backdrop-filter:blur(3px);color:var(--brand);text-align:center}.pog-upload-overlay .mini-spinner{width:34px;height:34px;border-width:4px;border-color:#f1d7eb;border-top-color:var(--brand)}.pog-upload-overlay b{font-size:17px}.pog-upload-overlay span{color:var(--muted);font-size:11px}
 .pog-visual{min-width:0}
 .pog-list{border-left:0;border-right:1px solid #d9dbd5}
 .pog-linked-count{padding:8px 11px;border:1px solid rgba(255,255,255,.28);border-radius:9px;background:rgba(255,255,255,.12);font-size:8px;font-weight:900;white-space:nowrap}
