@@ -202,7 +202,9 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   }
   if(!pieces.length)return null;
   pieces.sort((a,b)=>a.page-b.page);
-  const targetHeight=1800,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
+  // Keep enough resolution for zooming while avoiding multi-megabyte POG
+  // images. The source PDFs remain on the server for re-analysis if needed.
+  const targetHeight=1200,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,10000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
   const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context)return null;
   const positions:PogPosition[]=[],rendered:Array<{piece:typeof pieces[number];offset:number;scale:number}>=[];let offset=0;
   pieces.forEach((piece,index)=>{
@@ -215,16 +217,16 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   // STT là cầu nối giữa marker trên ảnh; SKU/barcode là cầu nối tới Stock/Master.
   const allRows=tables.flatMap(({groups,page})=>parsePogRows(groups,page));
   const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
-  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.97));
+  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.84));
   return {image,width,height,positions,sourcePages:pieces.map((piece)=>piece.page)};
 }
 
 async function combinePogAnalyses(analyses:PogAnalysis[]):Promise<PogAnalysis|null> {
   if(!analyses.length)return null;if(analyses.length===1)return analyses[0];
-  const bitmaps=await Promise.all(analyses.map((analysis)=>createImageBitmap(analysis.image))),targetHeight=1800,rawWidths=analyses.map((analysis)=>analysis.width*targetHeight/analysis.height),rawTotal=rawWidths.reduce((sum,value)=>sum+value,0),fit=Math.min(1,12000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),width=Math.max(1,Math.round(rawTotal*fit)-(analyses.length-1));
+  const bitmaps=await Promise.all(analyses.map((analysis)=>createImageBitmap(analysis.image))),targetHeight=1200,rawWidths=analyses.map((analysis)=>analysis.width*targetHeight/analysis.height),rawTotal=rawWidths.reduce((sum,value)=>sum+value,0),fit=Math.min(1,10000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),width=Math.max(1,Math.round(rawTotal*fit)-(analyses.length-1));
   const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context){bitmaps.forEach((bitmap)=>bitmap.close());return null;}
   const positions:PogPosition[]=[];let offset=0;analyses.forEach((analysis,index)=>{const pieceWidth=Math.round(rawWidths[index]*fit);context.drawImage(bitmaps[index],offset,0,pieceWidth,height);for(const position of analysis.positions)positions.push({...position,x:(offset+position.x*pieceWidth)/width});offset+=pieceWidth-1;});bitmaps.forEach((bitmap)=>bitmap.close());
-  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể ghép nhiều file POG")),"image/webp",.97));return {image,width,height,positions,sourcePages:analyses.flatMap((analysis)=>analysis.sourcePages)};
+  const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể ghép nhiều file POG")),"image/webp",.84));return {image,width,height,positions,sourcePages:analyses.flatMap((analysis)=>analysis.sourcePages)};
 }
 
 async function analyzePogFiles(files:File[]):Promise<PogAnalysis|null> {
@@ -566,6 +568,21 @@ export default function Home() {
   // Mỗi phiên bản pipeline chỉ tự xử lý một lần cho từng bản PDF đã lưu.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(()=>{const sources=(data?.pogFiles||[]).filter((source)=>source.mimeType==="application/pdf"&&(!source.shelfImage||(source.analysisVersion||0)<POG_ANALYSIS_VERSION)&&!pogAutoAnalysisRef.current.has(`${source.id}:${source.updatedAt}:${POG_ANALYSIS_VERSION}`));if(!canManage(data?.actor.role)||!sources.length)return;for(const source of sources)pogAutoAnalysisRef.current.add(`${source.id}:${source.updatedAt}:${POG_ANALYSIS_VERSION}`);const timer=window.setTimeout(async()=>{let completed=0;try{for(const source of sources){const files=await loadPogSourceFiles(source),analysis=await analyzePogFiles(files);if(!analysis)continue;await savePogAnalysis(files[0],source.line,source.side,analysis,"reanalyze");completed++;}await loadData(true);if(completed)setToast(`Đã tự động chuẩn hóa ${completed}/${sources.length} Line/mặt theo quy trình POG chung.`);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tự động chuẩn hóa toàn bộ POG");}},350);return()=>window.clearTimeout(timer);},[data?.pogFiles,data?.actor.role]);
+  // Warm shelf images in the browser after the text/UI is ready. Requests are
+  // sequential and idle-scheduled so they never block the first paint or
+  // compete with an active search; slow/data-saving connections are skipped.
+  useEffect(()=>{
+    const sources=(data?.pogFiles||[]).filter((source)=>source.shelfImage&&source.shelfWidth&&source.shelfHeight);
+    const connection=(navigator as Navigator&{connection?:{saveData?:boolean;effectiveType?:string}}).connection;
+    if(!sources.length||connection?.saveData||/2g/i.test(connection?.effectiveType||""))return;
+    let stopped=false,index=0,timer=0;
+    const loadNext=()=>{
+      if(stopped||index>=sources.length)return;
+      const source=sources[index++],image=new Image();image.decoding="async";image.onload=()=>schedule();image.onerror=()=>schedule();image.src=`/api/pog?id=${encodeURIComponent(source.id)}&asset=shelf&v=${source.updatedAt}`;
+    };
+    const schedule=()=>{if(stopped||index>=sources.length)return;timer=window.setTimeout(loadNext,900);};
+    schedule();return()=>{stopped=true;window.clearTimeout(timer);};
+  },[data?.pogFiles]);
   const savePogPage = async (page:number) => { if(!pogModal)return; await mutate("updatePogPage",{line:pogModal.line,side:pogModal.side,page}); };
   const generateSuggestions = async () => {
     const value=suggestInput.trim();
@@ -990,5 +1007,5 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
 }
 function PogShelfImage({file,selected,positions,zoom=1}:{file:PogFile;selected?:Product;positions:PogPosition[];zoom?:number}) {
   const width=file.shelfWidth||1600,height=file.shelfHeight||720,markerOffset=Math.max(38,Math.min(width,height)*.035);
-  return <svg className="pog-shelf-image" style={{width:`${Math.max(.75,zoom)*100}%`}} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${file.id}&asset=shelf`} width={width} height={height}/>{positions.map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width+markerOffset} ${position.y*height})`}><circle className="pog-marker-pulse" r="224"/><circle className="pog-marker-ring" r="160"/></g>)}</svg>;
+  return <svg className="pog-shelf-image" style={{width:`${Math.max(.75,zoom)*100}%`}} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${encodeURIComponent(file.id)}&asset=shelf&v=${file.updatedAt}`} width={width} height={height}/>{positions.map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width+markerOffset} ${position.y*height})`}><circle className="pog-marker-pulse" r="224"/><circle className="pog-marker-ring" r="160"/></g>)}</svg>;
 }

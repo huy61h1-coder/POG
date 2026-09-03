@@ -1062,7 +1062,10 @@ app.get("/api/pog", async (req, res, next) => {
     if(!record)return res.status(404).send("Not found");
     const shelf=asText(req.query.asset)==="shelf"&&record.shelfFileKey,sourceIndex=Math.max(0,asInt(req.query.source)),sources=Array.isArray(record.sources)&&record.sources.length?record.sources:[{fileKey:record.fileKey,fileName:record.fileName,mimeType:record.mimeType}],source=sources[Math.min(sourceIndex,sources.length-1)],fileKey=shelf?record.shelfFileKey:source.fileKey,mimeType=shelf?(record.shelfMimeType||"image/webp"):source.mimeType,fileName=shelf?(record.shelfFileName||"pog-shelf.webp"):source.fileName;
     const filePath=path.join(uploadDir,fileKey);if(!existsSync(filePath))return res.status(404).send("Not found");
-    res.type(mimeType).set("Content-Disposition","inline; filename="+fileName.replace(/"/g,"")).sendFile(filePath);
+    // Shelf images are immutable because the URL includes the POG updatedAt
+    // version. Let browsers and the background preloader reuse them instantly.
+    const cacheControl=shelf?"public, max-age=31536000, immutable":"private, max-age=300";
+    res.type(mimeType).set({"Content-Disposition":"inline; filename="+fileName.replace(/"/g,""),"Cache-Control":cacheControl}).sendFile(filePath);
   } catch (error) { next(error); }
 });
 
