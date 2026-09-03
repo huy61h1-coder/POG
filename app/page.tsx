@@ -80,7 +80,7 @@ const normalizeScannedBarcode = (rawValue:string) => {
 const productImageUrls = (value?:string) => [...new Set(String(value||"").split("|").map((item)=>item.trim()).filter(Boolean))].slice(0,32);
 const productImageUrl = (value?:string) => productImageUrls(value)[0]||"";
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=11;
+const POG_ANALYSIS_VERSION=12;
 const STORE_SNAPSHOT_KEY="fulfillment-store-snapshot-v1";
 function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
   if(typeof window==="undefined")return null;
@@ -177,7 +177,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   const [pdfjs,workerModule]=await Promise.all([import("pdfjs-dist"),import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
   pdfjs.GlobalWorkerOptions.workerSrc=workerModule.default;
   const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
-  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
+  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number;hasRows:boolean}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
   for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
     const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:2.4}),textContent=await page.getTextContent();
     const tokens:PdfTextToken[]=[];
@@ -236,16 +236,22 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       if(!Number.isInteger(number)||number<1||number>999||token.fontSize<5||markers.has(number))continue;
       if(token.x>=crop.x&&token.x<=crop.x+crop.width&&token.y>=crop.y&&token.y<=crop.y+crop.height*.92)markers.set(number,{x:token.x-crop.x,y:token.y-crop.y});
     }
-    pieces.push({canvas:shelfCanvas,crop:{x:0,y:0,width:shelfCanvas.width,height:shelfCanvas.height},markers,page:pageNumber});
+    pieces.push({canvas:shelfCanvas,crop:{x:0,y:0,width:shelfCanvas.width,height:shelfCanvas.height},markers,page:pageNumber,hasRows:rows.length>=2});
   }
   if(!pieces.length)return null;
-  pieces.sort((a,b)=>a.page-b.page);
+  // If the PDF contains Product List tables, ignore overview pages without
+  // rows; they are often a duplicate full-layout drawing and would make one
+  // bay appear disproportionately large when concatenated. For image-only
+  // PDFs, keep every detected visual shelf page.
+  const shelfPieces=tables.length?pieces.filter((piece)=>piece.hasRows):pieces;
+  if(!shelfPieces.length)return null;
+  shelfPieces.sort((a,b)=>a.page-b.page);
   // Keep enough resolution for zooming while avoiding multi-megabyte POG
   // images. The source PDFs remain on the server for re-analysis if needed.
-  const targetHeight=1200,rawWidths=pieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,10000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,pieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
+  const targetHeight=1200,rawWidths=shelfPieces.map((piece)=>piece.crop.width*targetHeight/piece.crop.height),rawTotal=rawWidths.reduce((sum,width)=>sum+width,0),fit=Math.min(1,10000/rawTotal),height=Math.max(1,Math.round(targetHeight*fit)),overlap=Math.max(0,shelfPieces.length-1),width=Math.max(1,Math.round(rawTotal*fit)-overlap);
   const output=document.createElement("canvas");output.width=width;output.height=height;const context=output.getContext("2d");if(!context)return null;
   const positions:PogPosition[]=[],rendered:Array<{piece:typeof pieces[number];offset:number;scale:number}>=[];let offset=0;
-  pieces.forEach((piece,index)=>{
+  shelfPieces.forEach((piece,index)=>{
     const pieceWidth=Math.round(rawWidths[index]*fit),scale=height/piece.crop.height;
     context.drawImage(piece.canvas,piece.crop.x,piece.crop.y,piece.crop.width,piece.crop.height,offset,0,pieceWidth,height);
     rendered.push({piece,offset,scale});
@@ -256,7 +262,7 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   const allRows=tables.flatMap(({groups,page})=>parsePogRows(groups,page));
   const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
   const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.84));
-  return {image,width,height,positions,sourcePages:pieces.map((piece)=>piece.page)};
+  return {image,width,height,positions,sourcePages:shelfPieces.map((piece)=>piece.page)};
 }
 
 async function combinePogAnalyses(analyses:PogAnalysis[]):Promise<PogAnalysis|null> {
