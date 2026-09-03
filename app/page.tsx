@@ -14,7 +14,7 @@ type OrderHistoryItem = PickItem & { completedAt:number; completedBy?:string };
 type Actor = { userId:string; username:string; email:string; name:string; role:Role; active:boolean };
 type Audit = { id:string; action:string; userId:string; userName:string; createdAt:number };
 type UserRole = { userId:string; username:string; email:string; name:string; role:Role; active:boolean; createdAt:number; updatedAt?:number };
-type PogPosition = { number:number; sku:string; barcode:string; name:string; x:number; y:number };
+type PogPosition = { number:number; sku:string; barcode:string; name:string; x:number; y:number; linked?:boolean };
 type PogSource = { fileName:string; mimeType:string };
 type PogFile = { id:string; line:string; side:"A"|"B"; fileName:string; mimeType:string; sources?:PogSource[]; page?:number; shelfImage?:boolean; shelfWidth?:number; shelfHeight?:number; positions?:PogPosition[]; analysisVersion?:number; updatedAt:number };
 type LineConfig = { line:string; name:string; color:string; logo:string; updatedAt?:number };
@@ -180,7 +180,6 @@ async function analyzePogPdf(file:File,mode:PogAnalysisMode="auto"):Promise<PogA
   const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
   const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number;hasRows:boolean}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
   for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
-    if((mode==="page1"&&pageNumber!==1)||(mode==="page2"&&pageNumber!==2))continue;
     const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:2.4}),textContent=await page.getTextContent();
     const tokens:PdfTextToken[]=[];
     for(const item of textContent.items){
@@ -269,7 +268,7 @@ async function analyzePogPdf(file:File,mode:PogAnalysisMode="auto"):Promise<PogA
   // Chỉ đọc và liên kết dữ liệu sau khi toàn bộ ảnh kệ đã được ghép xong.
   // STT là cầu nối giữa marker trên ảnh; SKU/barcode là cầu nối tới Stock/Master.
   const allRows=tables.flatMap(({groups,page})=>parsePogRows(groups,page));
-  const linked=new Set<string>();for(const row of allRows){const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0];if(!target)continue;const marker=target.piece.markers.get(row.number),key=`${row.number}:${row.sku}:${target.piece.page}`;if(!marker||linked.has(key))continue;linked.add(key);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height});}
+  const linkedRows=new Set<string>(),usedMarkers=new Set<string>();for(const row of allRows){const rowKey=`${row.page}:${row.number}:${row.sku}:${row.barcode}`;if(linkedRows.has(rowKey))continue;linkedRows.add(rowKey);const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0],marker=target?.piece.markers.get(row.number),markerKey=target?`${target.piece.page}:${row.number}`:"";if(target&&marker&&!usedMarkers.has(markerKey)){usedMarkers.add(markerKey);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height,linked:true});}else positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:0,y:0,linked:false});}
   const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.84));
   return {image,width,height,positions,sourcePages:shelfPieces.map((piece)=>piece.page)};
 }
@@ -407,7 +406,7 @@ export default function Home() {
   // loading panel on every keystroke.
   const searchMatchesCacheRef = useRef<Product[]>([]);
   const clearProductCaches=useCallback(()=>{searchCacheRef.current.clear();productViewCacheRef.current.clear();},[]);
-  const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
+  const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){if(position.linked===false)continue;const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
   const pogLocationFor=useCallback((product:Pick<Product,"sku"|"barcode"|"supplierBarcode">)=>pogLocationIndex.get(normalize(product.sku))||pogLocationIndex.get(normalize(product.barcode))||pogLocationIndex.get(normalize(product.supplierBarcode)),[pogLocationIndex]);
   const withPogLocation=useCallback(<T extends Product,>(product:T):T=>{const location=pogLocationFor(product);return {...product,shelfLine:location?.line||"",shelfSide:location?.side||"",shelfPosition:location?.position.number||0} as T;},[pogLocationFor]);
   const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
@@ -1041,8 +1040,8 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
   // xuất hiện ở khu vực dưới POG mà không cần chạm thêm vào danh sách.
   const selected=products.find((p)=>p.id===modal.selectedId)||(search.trim()&&products.length===1?products[0]:undefined);
   const selectedKeys=new Set(selected?[selected.sku,selected.barcode,selected.supplierBarcode].map(normalize).filter(Boolean):[]);
-  const linkedPositions=selected?file?.positions?.filter((position)=>[position.sku,position.barcode].map(normalize).some((key)=>selectedKeys.has(key)))||[]:[];
-  const positionsFor=(product:Product)=>{const keys=new Set([product.sku,product.barcode,product.supplierBarcode].map(normalize).filter(Boolean));return file?.positions?.filter((position)=>[position.sku,position.barcode].map(normalize).some((key)=>keys.has(key)))||[];};
+  const linkedPositions=selected?file?.positions?.filter((position)=>position.linked!==false&&[position.sku,position.barcode].map(normalize).some((key)=>selectedKeys.has(key)))||[]:[];
+  const positionsFor=(product:Product)=>{const keys=new Set([product.sku,product.barcode,product.supplierBarcode].map(normalize).filter(Boolean));return file?.positions?.filter((position)=>position.linked!==false&&[position.sku,position.barcode].map(normalize).some((key)=>keys.has(key)))||[];};
   const mobileProducts=search.trim()?products.slice(0,12):[];
   const [pdfPage,setPdfPage]=useState(file?.page||1),[searchExpanded,setSearchExpanded]=useState(false),[analysisMode,setAnalysisMode]=useState<PogAnalysisMode>("auto"),appendRef=useRef<HTMLInputElement>(null),fileCount=file?.sources?.length||1;
   const switchSide=(side:"A"|"B")=>{setSearch("");setPdfPage(1);setModal({line:modal.line,side})};
@@ -1061,5 +1060,5 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
 }
 function PogShelfImage({file,selected,positions,zoom=1}:{file:PogFile;selected?:Product;positions:PogPosition[];zoom?:number}) {
   const width=file.shelfWidth||1600,height=file.shelfHeight||720,markerOffset=Math.max(38,Math.min(width,height)*.035);
-  return <svg className="pog-shelf-image" style={{width:`${Math.max(.75,zoom)*100}%`}} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${encodeURIComponent(file.id)}&asset=shelf&v=${file.updatedAt}`} width={width} height={height}/>{positions.map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width+markerOffset} ${position.y*height})`}><circle className="pog-marker-pulse" r="224"/><circle className="pog-marker-ring" r="160"/></g>)}</svg>;
+  return <svg className="pog-shelf-image" style={{width:`${Math.max(.75,zoom)*100}%`}} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${encodeURIComponent(file.id)}&asset=shelf&v=${file.updatedAt}`} width={width} height={height}/>{positions.filter((position)=>position.linked!==false).map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width+markerOffset} ${position.y*height})`}><circle className="pog-marker-pulse" r="224"/><circle className="pog-marker-ring" r="160"/></g>)}</svg>;
 }
