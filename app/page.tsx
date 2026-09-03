@@ -79,8 +79,9 @@ const normalizeScannedBarcode = (rawValue:string) => {
 };
 const productImageUrls = (value?:string) => [...new Set(String(value||"").split("|").map((item)=>item.trim()).filter(Boolean))].slice(0,32);
 const productImageUrl = (value?:string) => productImageUrls(value)[0]||"";
+const isLinkedPogPosition = (position:PogPosition) => position.linked !== false && (position.x !== 0 || position.y !== 0);
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=12;
+const POG_ANALYSIS_VERSION=14;
 const STORE_SNAPSHOT_KEY="fulfillment-store-snapshot-v1";
 function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
   if(typeof window==="undefined")return null;
@@ -94,28 +95,31 @@ function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PogAnalysisMode = "auto" | "page1" | "page2";
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
-type PogRow = { number:number; sku:string; barcode:string; name:string; y:number; page:number };
+type PogRow = { number:number; sku:string; barcode:string; name:string; y:number; page:number; location?:string };
+type PogMarker = { number:number; x:number; y:number; location?:string };
 type CropBox = { x:number; y:number; width:number; height:number };
 
 function parsePogRows(groups:PdfTextToken[][],page:number):PogRow[] {
-  return groups.map((group)=>{
+  let location="";
+  const rows:PogRow[]=[];
+  for(const group of groups){
     const sorted=[...group].sort((a,b)=>a.x-b.x),joined=sorted.map((token)=>token.text).join(" ").replace(/\s+/g," ").trim();
+    const locationHeader=joined.match(/(?:fixel\s*[_-]?\s*id|location\s*[_-]?\s*id)\s+([a-z0-9]+(?:\/[a-z0-9]+)?)/i)||joined.match(/^([0-9]{1,2}\/[0-9]{1,2})$/);
+    if(locationHeader)location=locationHeader[1];
     // Mẫu chuẩn: STT | SKU | barcode | tên sản phẩm.
     const skuAndBarcode=joined.match(/^(\d{1,4})[.)]?\s+([A-Z0-9-]{4,20})\s+(\d{6,20})\s+(.{2,})$/i);
-    if(skuAndBarcode)return {number:Number(skuAndBarcode[1]),sku:skuAndBarcode[2],barcode:skuAndBarcode[3],name:skuAndBarcode[4].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page};
-    // Microsoft Print to PDF đôi khi ghép SKU 8 số và barcode 13 số thành
-    // một chuỗi 21 số (vd. 105319144895249104819). Tách từ phải sang trái
-    // để vẫn giữ đúng khóa liên kết với Stock và Master Data.
+    if(skuAndBarcode){rows.push({number:Number(skuAndBarcode[1]),sku:skuAndBarcode[2],barcode:skuAndBarcode[3],name:skuAndBarcode[4].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page,location:location||undefined});continue;}
+    // Microsoft Print to PDF đôi khi ghép SKU 8 số và barcode 13 số thành một chuỗi 21 số.
     const gluedSkuAndBarcode=joined.match(/^(\d{1,4})[.)]?\s+(\d{18,33})(?=\D)\s*(.{2,})$/i);
     if(gluedSkuAndBarcode){
       const ids=gluedSkuAndBarcode[2],barcode=ids.slice(-13),sku=ids.slice(0,-13);
-      if(sku.length>=4)return {number:Number(gluedSkuAndBarcode[1]),sku,barcode,name:gluedSkuAndBarcode[3].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page};
+      if(sku.length>=4){rows.push({number:Number(gluedSkuAndBarcode[1]),sku,barcode,name:gluedSkuAndBarcode[3].replace(/\s+(?:\d+|\*)\s+(?:\d+|\*)$/,"").trim(),y:group[0].y,page,location:location||undefined});continue;}
     }
     // Một số POG dùng Location_ID | UPC | Name. UPC là barcode liên kết Master Data.
     const upcAndName=joined.match(/^(\d{1,4})[.)]?\s+(\d{8,20})\s+(.{2,}?)(?:\s+(?:\d+|\*)\s+(?:\d+|\*))?$/);
-    if(upcAndName)return {number:Number(upcAndName[1]),sku:upcAndName[2],barcode:upcAndName[2],name:upcAndName[3].trim(),y:group[0].y,page};
-    return null;
-  }).filter((row):row is PogRow=>Boolean(row));
+    if(upcAndName)rows.push({number:Number(upcAndName[1]),sku:upcAndName[2],barcode:upcAndName[2],name:upcAndName[3].trim(),y:group[0].y,page,location:location||undefined});
+  }
+  return rows;
 }
 
 function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,tokens:PdfTextToken[]):CropBox|null {
@@ -178,7 +182,7 @@ async function analyzePogPdf(file:File,mode:PogAnalysisMode="auto"):Promise<PogA
   const [pdfjs,workerModule]=await Promise.all([import("pdfjs-dist"),import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
   pdfjs.GlobalWorkerOptions.workerSrc=workerModule.default;
   const pdfDocument=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
-  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:Map<number,{x:number;y:number}>;page:number;hasRows:boolean}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
+  const pieces:Array<{canvas:HTMLCanvasElement;crop:{x:number;y:number;width:number;height:number};markers:PogMarker[];page:number;hasRows:boolean}>=[],tables:Array<{groups:PdfTextToken[][];page:number}>=[];
   for(let pageNumber=1;pageNumber<=pdfDocument.numPages;pageNumber++){
     const page=await pdfDocument.getPage(pageNumber),viewport=page.getViewport({scale:2.4}),textContent=await page.getTextContent();
     const tokens:PdfTextToken[]=[];
@@ -236,11 +240,19 @@ async function analyzePogPdf(file:File,mode:PogAnalysisMode="auto"):Promise<PogA
     }
     if(!crop)continue;
     const shelfCanvas=document.createElement("canvas");shelfCanvas.width=Math.max(1,Math.ceil(crop.width));shelfCanvas.height=Math.max(1,Math.ceil(crop.height));const shelfContext=shelfCanvas.getContext("2d");if(!shelfContext)continue;shelfContext.drawImage(canvas,crop.x,crop.y,crop.width,crop.height,0,0,shelfCanvas.width,shelfCanvas.height);
-    const markers=new Map<number,{x:number;y:number}>();
+    const locationAnchors=tokens.filter((token)=>/^\d{1,2}\/\d{1,2}$/.test(token.text));
+    const markers:PogMarker[]=[];
     for(const token of tokens){
       const number=Number(token.text.replace(/[.)]/g,""));
-      if(!Number.isInteger(number)||number<1||number>999||token.fontSize<5||markers.has(number))continue;
-      if(token.x>=crop.x&&token.x<=crop.x+crop.width&&token.y>=crop.y&&token.y<=crop.y+crop.height*.92)markers.set(number,{x:token.x-crop.x,y:token.y-crop.y});
+      if(!Number.isInteger(number)||number<1||number>999||token.fontSize<5)continue;
+      if(token.x>=crop.x&&token.x<=crop.x+crop.width&&token.y>=crop.y&&token.y<=crop.y+crop.height*.92){
+        // The location label is often printed at the far right edge of the
+        // shelf (or just outside the crop), so do not discard it based on X.
+        // Vertical proximity keeps repeated STT numbers in different bays
+        // distinguishable (e.g. STT 6 in 10/2 vs 10/4).
+        const nearest=locationAnchors.sort((a,b)=>Math.abs(a.y-token.y)*4+Math.abs(a.x-token.x)- (Math.abs(b.y-token.y)*4+Math.abs(b.x-token.x)))[0];
+        markers.push({number,x:token.x-crop.x,y:token.y-crop.y,location:nearest?.text});
+      }
     }
     pieces.push({canvas:shelfCanvas,crop:{x:0,y:0,width:shelfCanvas.width,height:shelfCanvas.height},markers,page:pageNumber,hasRows:rows.length>=2});
   }
@@ -268,7 +280,7 @@ async function analyzePogPdf(file:File,mode:PogAnalysisMode="auto"):Promise<PogA
   // Chỉ đọc và liên kết dữ liệu sau khi toàn bộ ảnh kệ đã được ghép xong.
   // STT là cầu nối giữa marker trên ảnh; SKU/barcode là cầu nối tới Stock/Master.
   const allRows=tables.flatMap(({groups,page})=>parsePogRows(groups,page));
-  const linkedRows=new Set<string>(),usedMarkers=new Set<string>();for(const row of allRows){const rowKey=`${row.page}:${row.number}:${row.sku}:${row.barcode}`;if(linkedRows.has(rowKey))continue;linkedRows.add(rowKey);const target=[...rendered].filter(({piece})=>piece.markers.has(row.number)).sort((a,b)=>Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page))[0],marker=target?.piece.markers.get(row.number),markerKey=target?`${target.piece.page}:${row.number}`:"";if(target&&marker&&!usedMarkers.has(markerKey)){usedMarkers.add(markerKey);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height,linked:true});}else positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:0,y:0,linked:false});}
+  const linkedRows=new Set<string>(),usedMarkers=new Set<string>();for(const row of allRows){const rowKey=`${row.page}:${row.number}:${row.sku}:${row.barcode}`;if(linkedRows.has(rowKey))continue;linkedRows.add(rowKey);const candidates=[...rendered].flatMap(({piece,offset,scale})=>piece.markers.map((marker,index)=>({piece,offset,scale,marker,index,exact:Boolean(row.location&&marker.location===row.location)}))).filter(({marker})=>marker.number===row.number);const target=candidates.sort((a,b)=>Number(b.exact)-Number(a.exact)||(Math.abs(a.piece.page-row.page)-Math.abs(b.piece.page-row.page)))[0],marker=target?.marker,markerKey=target?`${target.piece.page}:${target.index}`:"";if(target&&marker&&!usedMarkers.has(markerKey)){usedMarkers.add(markerKey);positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:(target.offset+(marker.x-target.piece.crop.x)*target.scale)/width,y:((marker.y-target.piece.crop.y)*target.scale)/height,linked:true});}else positions.push({number:row.number,sku:row.sku,barcode:row.barcode,name:row.name,x:0,y:0,linked:false});}
   const image=await new Promise<Blob>((resolve,reject)=>output.toBlob((blob)=>blob?resolve(blob):reject(new Error("Không thể tạo ảnh POG ghép")),"image/webp",.84));
   return {image,width,height,positions,sourcePages:shelfPieces.map((piece)=>piece.page)};
 }
@@ -406,7 +418,7 @@ export default function Home() {
   // loading panel on every keystroke.
   const searchMatchesCacheRef = useRef<Product[]>([]);
   const clearProductCaches=useCallback(()=>{searchCacheRef.current.clear();productViewCacheRef.current.clear();},[]);
-  const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){if(position.linked===false)continue;const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
+  const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){if(!isLinkedPogPosition(position))continue;const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
   const pogLocationFor=useCallback((product:Pick<Product,"sku"|"barcode"|"supplierBarcode">)=>pogLocationIndex.get(normalize(product.sku))||pogLocationIndex.get(normalize(product.barcode))||pogLocationIndex.get(normalize(product.supplierBarcode)),[pogLocationIndex]);
   const withPogLocation=useCallback(<T extends Product,>(product:T):T=>{const location=pogLocationFor(product);return {...product,shelfLine:location?.line||"",shelfSide:location?.side||"",shelfPosition:location?.position.number||0} as T;},[pogLocationFor]);
   const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
@@ -1040,8 +1052,8 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
   // xuất hiện ở khu vực dưới POG mà không cần chạm thêm vào danh sách.
   const selected=products.find((p)=>p.id===modal.selectedId)||(search.trim()&&products.length===1?products[0]:undefined);
   const selectedKeys=new Set(selected?[selected.sku,selected.barcode,selected.supplierBarcode].map(normalize).filter(Boolean):[]);
-  const linkedPositions=selected?file?.positions?.filter((position)=>position.linked!==false&&[position.sku,position.barcode].map(normalize).some((key)=>selectedKeys.has(key)))||[]:[];
-  const positionsFor=(product:Product)=>{const keys=new Set([product.sku,product.barcode,product.supplierBarcode].map(normalize).filter(Boolean));return file?.positions?.filter((position)=>position.linked!==false&&[position.sku,position.barcode].map(normalize).some((key)=>keys.has(key)))||[];};
+  const linkedPositions=selected?file?.positions?.filter((position)=>isLinkedPogPosition(position)&&[position.sku,position.barcode].map(normalize).some((key)=>selectedKeys.has(key)))||[]:[];
+  const positionsFor=(product:Product)=>{const keys=new Set([product.sku,product.barcode,product.supplierBarcode].map(normalize).filter(Boolean));return file?.positions?.filter((position)=>isLinkedPogPosition(position)&&[position.sku,position.barcode].map(normalize).some((key)=>keys.has(key)))||[];};
   const mobileProducts=search.trim()?products.slice(0,12):[];
   const [pdfPage,setPdfPage]=useState(file?.page||1),[searchExpanded,setSearchExpanded]=useState(false),[analysisMode,setAnalysisMode]=useState<PogAnalysisMode>("auto"),appendRef=useRef<HTMLInputElement>(null),fileCount=file?.sources?.length||1;
   const switchSide=(side:"A"|"B")=>{setSearch("");setPdfPage(1);setModal({line:modal.line,side})};
@@ -1060,5 +1072,5 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
 }
 function PogShelfImage({file,selected,positions,zoom=1}:{file:PogFile;selected?:Product;positions:PogPosition[];zoom?:number}) {
   const width=file.shelfWidth||1600,height=file.shelfHeight||720,markerOffset=Math.max(38,Math.min(width,height)*.035);
-  return <svg className="pog-shelf-image" style={{width:`${Math.max(.75,zoom)*100}%`}} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:"Ảnh POG đã ghép"}><image href={`/api/pog?id=${encodeURIComponent(file.id)}&asset=shelf&v=${file.updatedAt}`} width={width} height={height}/>{positions.filter((position)=>position.linked!==false).map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width+markerOffset} ${position.y*height})`}><circle className="pog-marker-pulse" r="224"/><circle className="pog-marker-ring" r="160"/></g>)}</svg>;
+  return <svg className="pog-shelf-image" style={{width:`${Math.max(.75,zoom)*100}%`}} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={selected?`Vị trí ${selected.name} trên POG`:'Ảnh POG đã ghép'}><image href={`/api/pog?id=${encodeURIComponent(file.id)}&asset=shelf&v=${file.updatedAt}`} width={width} height={height}/>{positions.filter(isLinkedPogPosition).map((position,index)=><g key={`${position.number}-${index}`} className="pog-svg-marker" transform={`translate(${position.x*width+markerOffset} ${position.y*height})`}><circle className="pog-marker-pulse" r="224"/><circle className="pog-marker-ring" r="160"/></g>)}</svg>;
 }
