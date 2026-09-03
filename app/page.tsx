@@ -80,7 +80,7 @@ const normalizeScannedBarcode = (rawValue:string) => {
 const productImageUrls = (value?:string) => [...new Set(String(value||"").split("|").map((item)=>item.trim()).filter(Boolean))].slice(0,32);
 const productImageUrl = (value?:string) => productImageUrls(value)[0]||"";
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
-const POG_ANALYSIS_VERSION=10;
+const POG_ANALYSIS_VERSION=11;
 const STORE_SNAPSHOT_KEY="fulfillment-store-snapshot-v1";
 function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
   if(typeof window==="undefined")return null;
@@ -137,6 +137,40 @@ function cropShelfToProductBorder(canvas:HTMLCanvasElement,initial:CropBox,token
   return {x:Math.max(initial.x,left-1),y:Math.max(initial.y,top-1),width:Math.min(initial.x+initial.width,right+1)-Math.max(initial.x,left-1),height:Math.min(initial.y+initial.height,bottom+1)-Math.max(initial.y,top-1)};
 }
 
+// Some supplier POGs (such as Line 18) contain a clean shelf diagram but no
+// adjacent SKU/STT table. In that case the normal Line 16A parser has nothing
+// to link, yet the shelf image should still be available to view. Detect the
+// densest visual band below the page heading and use it as a safe image-only
+// POG; product linking remains empty until a table is supplied.
+function cropVisualShelf(canvas:HTMLCanvasElement):CropBox|null {
+  const context=canvas.getContext("2d",{willReadFrequently:true});if(!context)return null;
+  const {width,height}=canvas,data=context.getImageData(0,0,canvas.width,canvas.height).data,step=3,scanTop=Math.floor(height*.15),scanBottom=Math.floor(height*.96),scanSpan=scanBottom-scanTop;
+  const ink=(x:number,y:number)=>{const index=(y*width+x)*4,red=data[index],green=data[index+1],blue=data[index+2];return red<242||green<242||blue<242;};
+  // Product-list pages often place the actual shelf diagram in a narrow
+  // column beside a wide table. Find a full-height divider first so table
+  // text is never mistaken for the shelf image.
+  let visualRight=width;
+  for(let x=Math.floor(width*.18);x<Math.floor(width*.65);x++){let score=0;for(let y=scanTop;y<scanBottom;y+=step)if(ink(x,y)&&data[(y*width+x)*4]<125&&data[(y*width+x)*4+1]<125&&data[(y*width+x)*4+2]<125)score++;if(score>=scanSpan/step*.45){visualRight=x;break;}}
+  const rowScores:number[]=[];
+  for(let y=Math.floor(height*.18);y<height*.94;y+=step){let score=0;for(let x=0;x<visualRight;x+=step)if(ink(x,y))score++;rowScores.push(score);}
+  const threshold=Math.max(8,Math.floor(visualRight/step*.035)),runs:Array<{start:number;end:number;score:number}>=[];
+  let start=-1,last=-1,total=0;
+  for(let index=0;index<rowScores.length;index++){
+    const active=rowScores[index]>=threshold,y=Math.floor(height*.18)+index*step;
+    if(active){if(start<0){start=y;total=0;}last=y;total+=rowScores[index];continue;}
+    if(start>=0&&y-last>42){runs.push({start,end:last,score:total});start=-1;}
+  }
+  if(start>=0)runs.push({start,end:last,score:total});
+  const run=runs.filter((item)=>item.end-item.start>height*.12).sort((left,right)=>(right.end-right.start)*right.score-(left.end-left.start)*left.score)[0];
+  if(!run)return null;
+  const top=Math.max(0,run.start-10),bottom=Math.min(height,run.end+18),columnScores:number[]=[];
+  for(let x=0;x<visualRight;x+=step){let score=0;for(let y=top;y<bottom;y+=step)if(ink(x,y))score++;columnScores.push(score);}
+  const columnThreshold=Math.max(5,Math.floor((bottom-top)/step*.04));let left=-1,right=-1;
+  for(let index=0;index<columnScores.length;index++)if(columnScores[index]>=columnThreshold){if(left<0)left=index*step;right=index*step;}
+  if(left<0||right-left<visualRight*.35)return null;
+  return {x:Math.max(0,left-12),y:top,width:Math.min(visualRight,right+15)-Math.max(0,left-12),height:bottom-top};
+}
+
 async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
   if(file.type!=="application/pdf"&&!/\.pdf$/i.test(file.name))return null;
   // PDF.js is only needed when an administrator analyzes a POG upload. Keep
@@ -170,27 +204,28 @@ async function analyzePogPdf(file:File):Promise<PogAnalysis|null> {
       const group=groups.find((candidate)=>Math.abs(candidate[0].y-token.y)<=5);
       if(group)group.push(token);else groups.push([token]);
     }
-    const rows=parsePogRows(groups,pageNumber);
-    if(rows.length)tables.push({groups,page:pageNumber});if(rows.length<2)continue;
-    const rowYs=rows.map((row)=>row.y),rowGroups=groups.filter((group)=>parsePogRows([group],pageNumber).length>0),rowTokens=rowGroups.flat(),tableLeft=Math.min(...rowTokens.map((token)=>token.x)),tableRight=Math.max(...rowTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
-    // Ảnh kệ luôn được lấy từ vùng nằm kế bên và đối diện bảng dữ liệu,
-    // hỗ trợ cả PDF đặt ảnh bên trái lẫn bên phải danh sách sản phẩm.
-    // Chỉ lấy phía ĐỐI DIỆN bảng dữ liệu. Không so diện tích hai phía vì phần
-    // còn lại của bảng Name/Total thường lớn hơn ảnh kệ và đã từng được chọn nhầm.
-    const sideCandidates=(tableOnRight
-      ?[{x:0,y:0,width:tableLeft-14,height:viewport.height}]
-      :[{x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height}]
-    ).filter((box)=>box.width>viewport.width*.15&&box.height>viewport.height*.25);
-    const fallbackCandidates=[
-      {x:0,y:0,width:viewport.width,height:tableTop-14},
-      {x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}
-    ].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25);
-    const candidates=(sideCandidates.length?sideCandidates:fallbackCandidates).sort((a,b)=>b.width*b.height-a.width*a.height);
-    let crop=candidates[0];if(!crop)continue;
+    const rows=parsePogRows(groups,pageNumber);if(rows.length)tables.push({groups,page:pageNumber});
     const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
     const context=canvas.getContext("2d");if(!context)continue;
     await page.render({canvas,canvasContext:context,viewport}).promise;
-    const productCrop=cropShelfToProductBorder(canvas,crop,tokens);if(!productCrop)continue;crop=productCrop;
+    // Prefer the visual shelf detector on every page. Product-list pages in
+    // supplier PDFs commonly place the shelf beside the table; using the
+    // table crop first would concatenate the blue Product List instead of the
+    // actual shelf image. The table rows are still retained above for STT ↔
+    // SKU linking after all shelf pieces are assembled.
+    let crop:CropBox|null=cropVisualShelf(canvas);
+    if(!crop&&rows.length>=2){
+      const rowYs=rows.map((row)=>row.y),rowGroups=groups.filter((group)=>parsePogRows([group],pageNumber).length>0),rowTokens=rowGroups.flat(),tableLeft=Math.min(...rowTokens.map((token)=>token.x)),tableRight=Math.max(...rowTokens.map((token)=>token.x)),tableTop=Math.max(0,Math.min(...rowYs)-18),tableBottom=Math.min(viewport.height,Math.max(...rowYs)+18);
+      // Ảnh kệ luôn được lấy từ vùng nằm kế bên và đối diện bảng dữ liệu.
+      const sideCandidates=(tableOnRight
+        ?[{x:0,y:0,width:tableLeft-14,height:viewport.height}]
+        :[{x:tableRight+14,y:0,width:viewport.width-tableRight-14,height:viewport.height}]
+      ).filter((box)=>box.width>viewport.width*.15&&box.height>viewport.height*.25);
+      const fallbackCandidates=[{x:0,y:0,width:viewport.width,height:tableTop-14},{x:0,y:tableBottom+14,width:viewport.width,height:viewport.height-tableBottom-14}].filter((box)=>box.width>viewport.width*.25&&box.height>viewport.height*.25);
+      const candidate=(sideCandidates.length?sideCandidates:fallbackCandidates).sort((a,b)=>b.width*b.height-a.width*a.height)[0];
+      crop=candidate?cropShelfToProductBorder(canvas,candidate,tokens):null;
+    }
+    if(!crop)continue;
     const shelfCanvas=document.createElement("canvas");shelfCanvas.width=Math.max(1,Math.ceil(crop.width));shelfCanvas.height=Math.max(1,Math.ceil(crop.height));const shelfContext=shelfCanvas.getContext("2d");if(!shelfContext)continue;shelfContext.drawImage(canvas,crop.x,crop.y,crop.width,crop.height,0,0,shelfCanvas.width,shelfCanvas.height);
     const markers=new Map<number,{x:number;y:number}>();
     for(const token of tokens){
@@ -995,7 +1030,7 @@ function PogModal({modal,setModal,products,total,file,search,setSearch,canUpload
   const switchSide=(side:"A"|"B")=>{setSearch("");setPdfPage(1);setModal({line:modal.line,side})};
   return <div className="modal-backdrop pog-backdrop"><section className="pog-modal">{uploading&&<div className="pog-upload-overlay" role="status" aria-live="polite"><i className="mini-spinner"/><b>Đang upload POG…</b><span>Đang đọc file và ghép ảnh kệ, vui lòng chờ.</span></div>}<div className="pog-head"><div><p>SƠ ĐỒ KỆ CHI TIẾT</p><h2>Line {modal.line} · {aisleNames[modal.line]||"Khu vực"}</h2></div><div className="side-switch"><button disabled={uploading} className={modal.side==="A"?"active":""} onClick={()=>switchSide("A")}>Mặt A</button><button disabled={uploading} className={modal.side==="B"?"active":""} onClick={()=>switchSide("B")}>Mặt B</button></div>{file?.mimeType==="application/pdf"&&!file.shelfImage&&<label className="pdf-page-picker">Trang sơ đồ<select disabled={uploading} value={pdfPage} onChange={(e)=>{const page=Number(e.target.value);setPdfPage(page);onPageChange(page)}}>{Array.from({length:12},(_,index)=><option key={index+1} value={index+1}>Trang {index+1}{index<2?" · thường dùng":""}</option>)}</select></label>}{file?.shelfImage&&<span className="pog-linked-count">Đã ghép {fileCount} file · {file.positions?.length||0} vị trí</span>}{canUpload&&file?.mimeType==="application/pdf"&&<button disabled={uploading} className="upload-pog reanalyze-pog" title="Tạo lại ảnh ghép từ tất cả PDF đang lưu" onClick={onReanalyze}>↻ Ghép lại sát viền</button>}{canUpload&&file&&<button disabled={uploading} className="upload-pog add-pog" title="Giữ POG hiện có và ghép thêm một PDF" onClick={()=>appendRef.current?.click()}>＋ Thêm file POG</button>}{canUpload&&<button disabled={uploading} className="upload-pog" title="Thay toàn bộ POG bằng PDF hoặc ảnh mới" onClick={()=>uploadRef.current?.click()}>↑ {file?"Thay POG":"Tải POG PDF/ảnh"}</button>}<button disabled={uploading} className="close-pog" onClick={onClose}>×</button></div>
     <div className={`pog-body pog-canvas-layout${searchExpanded?" pog-search-expanded":""}${selected?" pog-has-product":""}`}>
-      <aside className="pog-list"><label>⌕<input disabled={uploading} value={search} onChange={(e)=>setSearch(e.target.value)} onFocus={()=>setSearchExpanded(true)} onBlur={()=>window.setTimeout(()=>setSearchExpanded(false),160)} placeholder="Tìm SKU, barcode, tên…"/><b>{products.length}/{total} SP</b></label>{total>products.length&&<p className="pog-limit-note">Đang hiện 200 kết quả đầu · nhập SKU hoặc tên để tìm chính xác.</p>}<div>{products.map((p)=><button key={p.id} className={p.id===selected?.id?"active":""} onClick={()=>setModal({...modal,selectedId:p.id})}><span>{file?.shelfImage?`POG ${file.line}${file.side}`:"POG chưa chuẩn"}</span><div><small>SKU {p.sku}</small><b>{p.name}</b><em>{p.supplierBarcode||p.barcode}</em></div><StockBadge stock={p.stock}/></button>)}{!products.length&&<div className="empty big">{file?.shelfImage?"Chưa có sản phẩm liên kết trong Master Data.":"POG cần được phân tích và ghép trước khi liên kết sản phẩm."}</div>}</div>{selected&&<section className="pog-selected"><div><b>{file?.shelfImage?`POG Line ${file.line}${file.side}`:"Chưa chuẩn hóa POG"}</b><span>{selected.name}</span><small>{file?.shelfImage?(linkedPositions.length?`${linkedPositions.length} vị trí POG: ${linkedPositions.map((position)=>position.number).join(", ")}`:"Chưa tìm thấy STT trên ảnh POG")+" · ":""}Tồn {selected.stock} · Loss {selected.loss} · HSD {selected.expDate||"chưa có"}</small></div><button disabled={selected.stock===0||uploading} onClick={()=>onPick(selected)}>+ Thêm vào đơn</button></section>}</aside>
+      <aside className="pog-list"><label>⌕<input disabled={uploading} value={search} onChange={(e)=>setSearch(e.target.value)} onFocus={()=>setSearchExpanded(true)} onBlur={()=>window.setTimeout(()=>setSearchExpanded(false),160)} placeholder="Tìm SKU, barcode, tên…"/><b>{products.length}/{total} SP</b></label>{total>products.length&&<p className="pog-limit-note">Đang hiện 200 kết quả đầu · nhập SKU hoặc tên để tìm chính xác.</p>}<div>{products.map((p)=><button key={p.id} className={p.id===selected?.id?"active":""} onClick={()=>setModal({...modal,selectedId:p.id})}><span>{file?.shelfImage?`POG ${file.line}${file.side}`:"POG chưa chuẩn"}</span><div><small>SKU {p.sku}</small><b>{p.name}</b><em>{p.supplierBarcode||p.barcode}</em></div><StockBadge stock={p.stock}/></button>)}{!products.length&&<div className="empty big">{file?.shelfImage?(file?.positions?.length?"Chưa có sản phẩm liên kết trong Master Data.":"POG đã hiển thị ảnh kệ; PDF này chưa có bảng STT/SKU/barcode để liên kết sản phẩm."):"POG cần được phân tích và ghép trước khi liên kết sản phẩm."}</div>}</div>{selected&&<section className="pog-selected"><div><b>{file?.shelfImage?`POG Line ${file.line}${file.side}`:"Chưa chuẩn hóa POG"}</b><span>{selected.name}</span><small>{file?.shelfImage?(linkedPositions.length?`${linkedPositions.length} vị trí POG: ${linkedPositions.map((position)=>position.number).join(", ")}`:"Chưa tìm thấy STT trên ảnh POG")+" · ":""}Tồn {selected.stock} · Loss {selected.loss} · HSD {selected.expDate||"chưa có"}</small></div><button disabled={selected.stock===0||uploading} onClick={()=>onPick(selected)}>+ Thêm vào đơn</button></section>}</aside>
       <div className="pog-visual"><PogCanvas file={file} modal={modal} selected={selected} positions={linkedPositions} canUpload={canUpload} onReanalyze={onReanalyze} onUpload={()=>uploadRef.current?.click()}/>{selected&&<PogProductDetails product={selected} file={file} positions={linkedPositions}/>}<div className="pog-file-label">{file?file.fileName:`POG Line ${modal.line}${modal.side}`}</div></div>
       <section className="pog-mobile-results" aria-live="polite">
         <header><b>Thông tin sản phẩm</b><span>{search.trim()?(total?`${total} kết quả`:"Không tìm thấy"):"Chưa chọn"}</span></header>
