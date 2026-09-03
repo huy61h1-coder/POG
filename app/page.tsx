@@ -57,7 +57,7 @@ function AppIcon({name}:{name:Tab}) {
 }
 const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"",barcode:"",line:"01",lineName:"SOUVENIR",side:"A",bay:1,price:0,promoPrice:0,stock:0,loss:0,expDate:"" };
 const money = new Intl.NumberFormat("vi-VN");
-const normalize = (value:unknown) => String(value??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
+const normalize = (value:unknown) => String(value??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[đĐ]/g,"d").toLowerCase().trim();
 const orderDateKey = (value:unknown) => {
   const text=String(value??"").trim();
   if(/^\d{4}-\d{2}-\d{2}$/.test(text))return text;

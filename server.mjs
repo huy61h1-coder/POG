@@ -73,7 +73,7 @@ function asText(value, fallback = "") { return typeof value === "string" ? value
 function asInt(value, fallback = 0) { const n = Number(value); return Number.isFinite(n) ? Math.trunc(n) : fallback; }
 function cleanLine(value) { const digits=asText(value, "01").replace(/\D/g, ""); return (digits||"1").padStart(2, "0").slice(0, 3); }
 function canManage(role) { return role === "ADMIN" || role === "MANAGER"; }
-function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase(); }
+function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[đĐ]/g,"d").toLowerCase(); }
 function normalizePhone(value) { return asText(value).replace(/[^\d+]/g,"").slice(0,24); }
 function localDateKey(value=Date.now()) {
   const date=new Date(value),time=date.getTime();
@@ -229,10 +229,30 @@ function productSummary(products,stockRecords=[],manualChecks=[]) {
   }
   return {stats,alerts,lines:[...lines].sort((a,b)=>Number(a)-Number(b))};
 }
-const productSearchCache=new WeakMap(),productLookupCache=new WeakMap(),productApiCache=new WeakMap(),stockApiCache=new WeakMap();
-function getProductSummary(state){return productSummary(state.products,state.stockRecords,state.manualChecks);}
+const productSearchCache=new WeakMap(),productLookupCache=new WeakMap(),productSearchIndexCache=new WeakMap(),productSummaryCache=new WeakMap(),productApiCache=new WeakMap(),stockApiCache=new WeakMap();
+function getProductSummary(state){let summary=productSummaryCache.get(state);if(!summary){summary=productSummary(state.products,state.stockRecords,state.manualChecks);productSummaryCache.set(state,summary);}return summary;}
 function productSearchText(product){let value=productSearchCache.get(product);if(!value){value=normalizeText([product.name,product.sku,product.barcode,product.supplierBarcode,product.division,product.divisionName,product.department,product.departmentName,product.line,product.lineName,product.side].join(" "));productSearchCache.set(product,value);}return value;}
 function productLookup(products){let lookup=productLookupCache.get(products);if(!lookup){lookup=new Map();for(const product of products){for(const value of [product.sku,product.barcode,product.supplierBarcode]){const key=normalizeText(value);if(key&&!lookup.has(key))lookup.set(key,product);}}productLookupCache.set(products,lookup);}return lookup;}
+function productSearchIndex(products){
+  let index=productSearchIndexCache.get(products);if(index)return index;
+  const records=[],bigrams=new Map();
+  for(let productIndex=0;productIndex<products.length;productIndex++){
+    const product=products[productIndex],text=productSearchText(product);records.push({product,text});
+    const seen=new Set();
+    for(let charIndex=0;charIndex<text.length-1;charIndex++){
+      const first=text.charCodeAt(charIndex),second=text.charCodeAt(charIndex+1),firstIsAlphaNumeric=(first>=48&&first<=57)||(first>=97&&first<=122),secondIsAlphaNumeric=(second>=48&&second<=57)||(second>=97&&second<=122);
+      if(!firstIsAlphaNumeric||!secondIsAlphaNumeric)continue;
+      const gram=text.slice(charIndex,charIndex+2);if(seen.has(gram))continue;seen.add(gram);
+      const bucket=bigrams.get(gram);if(bucket)bucket.push(productIndex);else bigrams.set(gram,[productIndex]);
+    }
+  }
+  index={records,bigrams};productSearchIndexCache.set(products,index);return index;
+}
+function productSearchCandidates(query,products){
+  const index=productSearchIndex(products),firstToken=query.split(/[^a-z0-9]+/).find((token)=>token.length>=2),bucket=firstToken?index.bigrams.get(firstToken.slice(0,2)):undefined;
+  if(!bucket)return index.records;
+  return bucket.map((productIndex)=>index.records[productIndex]).filter((entry)=>entry.text.includes(query));
+}
 function getProductApiCache(products){let cache=productApiCache.get(products);if(!cache){cache=new Map();productApiCache.set(products,cache);}return cache;}
 function getStockApiCache(records){let cache=stockApiCache.get(records);if(!cache){cache=new Map();stockApiCache.set(records,cache);}return cache;}
 function expiryRank(product){if(!product.expDate)return 0;const value=Date.parse(product.expDate+"T00:00:00");return Number.isFinite(value)?value:Number.MAX_SAFE_INTEGER;}
@@ -405,13 +425,16 @@ class StateStore {
     }
   }
   async read() {
-    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<3000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
+    // Keep one normalized in-memory snapshot for short read bursts (typing in
+    // search, opening POG, switching filters). Mutations refresh it immediately,
+    // so a longer TTL avoids reparsing the full Master Data JSON on every key.
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
     if(!this.localState)this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8")));
     return this.localState;
   }
   async save(state) {
-    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products);stockApiCache.delete(state.stockRecords); }
-    else { try{await writeLocalState(state);this.localState=state;productApiCache.delete(state.products);stockApiCache.delete(state.stockRecords);}catch(error){this.localState=null;throw error;} }
+    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords); }
+    else { try{await writeLocalState(state);this.localState=state;productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);}catch(error){this.localState=null;throw error;} }
   }
   async mutate(callback) {
     const run = async () => {
@@ -423,7 +446,7 @@ class StateStore {
           const state = ensureStateShape(result.rows[0].state);
           const value = await callback(state);
           await client.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
-          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productApiCache.delete(state.products);stockApiCache.delete(state.stockRecords);
+          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);
           return value;
         } catch (error) {
           await client.query("ROLLBACK");
@@ -720,14 +743,18 @@ app.get("/api/products", async(req,res,next)=>{
       if(stock==="available"&&!(current?.stock>0))return false;if(stock==="low"&&!(current?.stock>0&&current.stock<10))return false;if(stock==="out"&&current?.stock!==0)return false;
       return !query||productSearchText(product).includes(query);
     };
+    // Narrow text searches through a cached bigram index before applying the
+    // remaining filters. This keeps Excel-like contains searches responsive
+    // even when Master Data grows beyond tens of thousands of SKU.
+    const searchProducts=query?productSearchCandidates(query,state.products).map(({product})=>product):state.products;
     if(sort==="expiry"){
       let total=0,scanned=0;const heap=[],matchedLines=new Set(),limit=start+pageSize;
-      for(const product of state.products){if(++scanned%5000===0){await yieldToServer();if(req.destroyed)return;}if(!passesFilters(product))continue;total++;matchedLines.add(product.line);pushExpiryTop(heap,product,limit);}
+      for(const product of searchProducts){if(++scanned%5000===0){await yieldToServer();if(req.destroyed)return;}if(!passesFilters(product))continue;total++;matchedLines.add(product.line);pushExpiryTop(heap,product,limit);}
       const ordered=heap.sort((a,b)=>a.rank-b.rank||String(a.product.sku).localeCompare(String(b.product.sku))).map((entry)=>entry.product);
       const payload={products:ordered.slice(start,start+pageSize).map((product)=>withUploadedStock(product,uploaded)),total,page,pageSize,matchedLines:[...matchedLines]};if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);return res.set("Cache-Control","no-store").json(payload);
     }
     let total=0,ordinarySeen=0,scanned=0;const matches=[],exact=[],matchedLines=new Set();
-    for(const product of state.products){
+    for(const product of searchProducts){
       if(++scanned%5000===0){await yieldToServer();if(req.destroyed)return;}if(!passesFilters(product))continue;
       total++;matchedLines.add(product.line);
       const isExact=query&&(normalizeText(product.sku)===query||normalizeText(product.barcode)===query||normalizeText(product.supplierBarcode)===query);
@@ -737,7 +764,7 @@ app.get("/api/products", async(req,res,next)=>{
     if(exact.length){
       matches.length=0;let orderedIndex=0;
       for(const product of exact){if(orderedIndex>=start&&matches.length<pageSize)matches.push(product);orderedIndex++;}
-      if(matches.length<pageSize){let rescanned=0;for(const product of state.products){
+      if(matches.length<pageSize){let rescanned=0;for(const product of searchProducts){
         if(++rescanned%5000===0){await yieldToServer();if(req.destroyed)return;}
         if(!passesFilters(product))continue;
         if(normalizeText(product.sku)===query||normalizeText(product.barcode)===query||normalizeText(product.supplierBarcode)===query)continue;
