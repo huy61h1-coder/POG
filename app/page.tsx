@@ -336,12 +336,19 @@ export default function Home() {
   const pogAutoAnalysisRef = useRef(new Set<string>());
   const searchCacheRef = useRef(new Map<string,ProductPage>());
   const productViewCacheRef = useRef(new Map<string,ProductPage>());
+  // Keep the last successful suggestions visible while a new query is being
+  // resolved. This prevents the search popover from flashing a large blank
+  // loading panel on every keystroke.
+  const searchMatchesCacheRef = useRef<Product[]>([]);
   const clearProductCaches=useCallback(()=>{searchCacheRef.current.clear();productViewCacheRef.current.clear();},[]);
   const pogLocationIndex=useMemo(()=>{const index=new Map<string,{line:string;side:"A"|"B";position:PogPosition}>();for(const file of data?.pogFiles||[]){for(const position of file.positions||[]){const location={line:file.line,side:file.side,position};for(const key of [position.sku,position.barcode].map(normalize).filter(Boolean))if(!index.has(key))index.set(key,location);}}return index;},[data?.pogFiles]);
   const pogLocationFor=useCallback((product:Pick<Product,"sku"|"barcode"|"supplierBarcode">)=>pogLocationIndex.get(normalize(product.sku))||pogLocationIndex.get(normalize(product.barcode))||pogLocationIndex.get(normalize(product.supplierBarcode)),[pogLocationIndex]);
   const withPogLocation=useCallback(<T extends Product,>(product:T):T=>{const location=pogLocationFor(product);return {...product,shelfLine:location?.line||"",shelfSide:location?.side||"",shelfPosition:location?.position.number||0} as T;},[pogLocationFor]);
   const actorUserId=data?.actor.userId,pogLine=pogModal?.line,pogSide=pogModal?.side,activePogFile=pogLine&&pogSide?data?.pogFiles.find((file)=>file.id===pogLine+"_"+pogSide):undefined,activePogUpdated=activePogFile?.updatedAt||0,importStorageKey=actorUserId?"fulfillment-master-job:"+actorUserId:"";
   const productSource=tab==="CHECK_STOCK"?"stock":"master",effectiveStock=tab==="MAP"?"all":stockFilter,productSort=tab==="DATE"?"expiry":"",normalizedProductQuery=normalize(query.trim());
+  // Tables need a full page, but the global search suggestions only need a
+  // handful of rows. Smaller hidden-tab requests make typing feel instant.
+  const productPageSize=(tab==="PRODUCTS"||tab==="CHECK_STOCK")?100:(normalizedProductQuery?8:20);
 
   const loadData = useCallback(async (quiet=false) => {
     if (!quiet) setBusy(true);
@@ -373,26 +380,27 @@ export default function Home() {
   useEffect(()=>{
     if(!actorUserId)return;
     if(query.trim().length===1)return;
-    const requestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productRefresh].join("|");
-    const cachedView=productViewCacheRef.current.get(requestKey);if(cachedView){setProductResult({...cachedView,products:cachedView.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
+    const requestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productPageSize,productRefresh].join("|");
+    const cachedView=productViewCacheRef.current.get(requestKey);if(cachedView){if(normalizedProductQuery)searchMatchesCacheRef.current=cachedView.products.slice(0,8).map(withPogLocation);setProductResult({...cachedView,products:cachedView.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
       setProductsBusy(true);
       try {
-        const params=new URLSearchParams({page:String(productPage),pageSize:"100",stock:effectiveStock});
+        const params=new URLSearchParams({page:String(productPage),pageSize:String(productPageSize),stock:effectiveStock});
         if(normalizedProductQuery)params.set("q",normalizedProductQuery);if(productSort)params.set("sort",productSort);
         const endpoint=(productSource==="stock"?"/api/stock?":"/api/products?")+params,cacheKey=endpoint;
-        const cached=searchCacheRef.current.get(cacheKey);if(cached){productViewCacheRef.current.set(requestKey,cached);setProductResult({...cached,products:cached.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
+        const cached=searchCacheRef.current.get(cacheKey);if(cached){productViewCacheRef.current.set(requestKey,cached);if(normalizedProductQuery)searchMatchesCacheRef.current=cached.products.slice(0,8).map(withPogLocation);setProductResult({...cached,products:cached.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
         const response=await fetch(endpoint,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage&{error?:string};
         if(!response.ok)throw new Error(payload.error||"Không thể tải danh sách sản phẩm");
         if(searchCacheRef.current.size>80)searchCacheRef.current.delete(searchCacheRef.current.keys().next().value as string);searchCacheRef.current.set(cacheKey,payload);
         if(productViewCacheRef.current.size>100)productViewCacheRef.current.delete(productViewCacheRef.current.keys().next().value as string);productViewCacheRef.current.set(requestKey,payload);
+        if(normalizedProductQuery)searchMatchesCacheRef.current=payload.products.slice(0,8).map(withPogLocation);
         setProductResult({...payload,products:payload.products.map(withPogLocation)});setProductResultKey(requestKey);
         const lastPage=Math.max(1,Math.ceil(payload.total/payload.pageSize));if(productPage>lastPage)setProductPage(lastPage);
       } catch(cause){if(!controller.signal.aborted)setToast(cause instanceof Error?cause.message:"Không thể tải danh sách sản phẩm");}
       finally{if(!controller.signal.aborted)setProductsBusy(false);}
     },normalizedProductQuery?80:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
-  },[actorUserId,query,normalizedProductQuery,effectiveStock,productPage,productRefresh,productSource,productSort,withPogLocation]);
+  },[actorUserId,query,normalizedProductQuery,effectiveStock,productPage,productPageSize,productRefresh,productSource,productSort,withPogLocation]);
   useEffect(()=>{
     if(!actorUserId||!pogLine||!pogSide)return;
     const requestKey=[actorUserId,pogLine,pogSide,pogSearch.trim(),productRefresh,activePogUpdated].join("|");
@@ -464,9 +472,9 @@ export default function Home() {
     try{await fetch("/api/auth/logout",{method:"POST"});}finally{setSettingsOpen(false);setImportJob(null);setLoginOpen(false);setAuthMode(null);await loadData(true);setBusy(false);}
   };
 
-  const productRequestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productRefresh].join("|"),productsCurrent=productResultKey===productRequestKey;
+  const productRequestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productPageSize,productRefresh].join("|"),productsCurrent=productResultKey===productRequestKey;
   const products=productsCurrent?productResult.products:[],productsLoading=productsBusy||!productsCurrent;
-  const searchMatches = query.length >= 2 ? products.slice(0,8) : [];
+  const searchMatches = query.length >= 2 ? (productsCurrent?products:searchMatchesCacheRef.current).slice(0,8) : [];
   const pickedCount = (data?.picking||[]).filter((p)=>Boolean(p.picked)).length;
   const progress = data?.picking?.length ? Math.round(pickedCount/data.picking.length*100) : 0;
   const activePog = activePogFile;
@@ -579,7 +587,11 @@ export default function Home() {
           <span>⌕</span><input value={query} onChange={(e)=>{setQuery(e.target.value);setProductPage(1);}} onKeyDown={(e)=>{if(e.key==="Enter")void handleSearchEnter()}} placeholder="Tìm hoặc quét SKU, barcode…" />
           <button className="barcode-trigger" title="Quét barcode bằng camera" aria-label="Quét barcode bằng camera" onClick={()=>setScannerOpen(true)}><BarcodeIcon/></button>
           {query&&<button onClick={()=>{setQuery("");setProductPage(1);}}>×</button>}
-          {query.length>=2&&<div className="search-popover">{productsLoading?<div className="search-empty"><i className="mini-spinner"/><b>Đang tìm sản phẩm…</b></div>:<>{searchMatches.map((p)=>{const location=pogLocationFor(p);return <article key={p.id}><button className="search-result-main" onClick={()=>openProductOnMap(p)}><span><b>{p.name}</b><small>SKU {p.sku} · {location?`POG Line ${location.line}${location.side} · Vị trí ${location.position.number}`:"Chưa gán vị trí kệ POG"}</small></span><StockBadge stock={p.stock}/></button><button className="search-quick-add" disabled={p.stock===0} onClick={()=>void quickAdd(p)}>+ Đơn</button></article>;})}{!searchMatches.length&&<div className="search-empty"><b>Không tìm thấy sản phẩm</b><span>Kiểm tra lại SKU, barcode hoặc tên hàng.</span></div>}</>}</div>}
+          {query.length>=2&&<div className={"search-popover"+(productsLoading?" is-loading":"")}>
+            {productsLoading&&<div className="search-loading-indicator"><i className="mini-spinner"/><span>Đang lọc…</span></div>}
+            {searchMatches.map((p)=>{const location=pogLocationFor(p);return <article key={p.id}><button className="search-result-main" onClick={()=>openProductOnMap(p)}><span><b>{p.name}</b><small>SKU {p.sku} · {location?`POG Line ${location.line}${location.side} · Vị trí ${location.position.number}`:"Chưa gán vị trí kệ POG"}</small></span><StockBadge stock={p.stock}/></button><button className="search-quick-add" disabled={p.stock===0} onClick={()=>void quickAdd(p)}>+ Đơn</button></article>;})}
+            {!productsLoading&&!searchMatches.length&&<div className="search-empty"><b>Không tìm thấy sản phẩm</b><span>Kiểm tra lại SKU, barcode hoặc tên hàng.</span></div>}
+          </div>}
         </div>
         <button className="top-order" onClick={()=>{setTab("ORDER");setProductPage(1);}}><span>ĐƠN SOẠN</span><b>{pickedCount}/{data.picking.length}</b><i><em style={{width:progress+"%"}}/></i></button>
         {importActive&&<button className="import-job-chip" onClick={()=>{setTab("PRODUCTS");setProductPage(1);}} title={importJob?.phase}><i/><span>Đang nhập Excel<b>{Math.round(importJob?.percent||0)}%</b></span></button>}
