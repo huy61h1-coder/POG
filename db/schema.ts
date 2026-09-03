@@ -50,6 +50,14 @@ export const pogFiles = sqliteTable("pog_files", {
   fileKey: text("file_key").notNull(),
   fileName: text("file_name").notNull(),
   mimeType: text("mime_type").notNull(),
+  shelfImageKey: text("shelf_image_key"),
+  shelfWidth: integer("shelf_width"),
+  shelfHeight: integer("shelf_height"),
+  positionsJson: text("positions_json").notNull().default("[]"),
+  sourcePages: text("source_pages").notNull().default(""),
+  analysisVersion: integer("analysis_version").notNull().default(0),
+  page: integer("page").notNull().default(1),
+  sourcesJson: text("sources_json").notNull().default("[]"),
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [uniqueIndex("idx_pog_line_side").on(table.line, table.side)]);
 

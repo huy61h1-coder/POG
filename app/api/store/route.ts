@@ -9,6 +9,9 @@ const cleanLine = (value: unknown) => {
   return String(Math.min(28, Math.max(1, asInt(raw, 1)))).padStart(2, "0");
 };
 const canManage = (role: string) => role === "ADMIN" || role === "MANAGER";
+const parseJson = <T,>(value: unknown, fallback: T): T => {
+  try { return typeof value === "string" ? JSON.parse(value) as T : fallback; } catch { return fallback; }
+};
 
 export async function GET(request: Request) {
   try {
@@ -21,10 +24,26 @@ export async function GET(request: Request) {
         i.quantity,i.picked FROM picking_items i JOIN products p ON p.id=i.product_id
         WHERE i.user_id=? ORDER BY i.created_at`).bind(actor.userId).all(),
       db.prepare("SELECT user_id AS userId,email,name,role,created_at AS createdAt FROM roles ORDER BY created_at").all(),
-      db.prepare("SELECT id,line,side,file_name AS fileName,mime_type AS mimeType,updated_at AS updatedAt FROM pog_files ORDER BY line,side").all(),
+      db.prepare(`SELECT id,line,side,file_name AS fileName,mime_type AS mimeType,updated_at AS updatedAt,
+        shelf_image_key AS shelfImageKey,shelf_width AS shelfWidth,shelf_height AS shelfHeight,
+        positions_json AS positionsJson,source_pages AS sourcePages,analysis_version AS analysisVersion,
+        page,sources_json AS sourcesJson FROM pog_files ORDER BY line,side`).all(),
       db.prepare("SELECT line,name,color,logo,updated_at AS updatedAt FROM line_configs ORDER BY CAST(line AS INTEGER)").all(),
     ]);
-    return Response.json({ actor, products: productsResult.results, logs: logsResult.results, picking: pickingResult.results, users: usersResult.results, pogFiles: pogResult.results, lineConfigs: lineConfigsResult.results });
+    const pogFiles = pogResult.results.map((row) => {
+      const record = row as Record<string, unknown>;
+      const sources = parseJson<Array<Record<string, unknown>>>(record.sourcesJson, []).map((source) => ({ fileName: String(source.fileName || ""), mimeType: String(source.mimeType || "application/pdf") })).filter((source) => source.fileName);
+      return {
+        id: String(record.id || ""), line: String(record.line || ""), side: record.side === "B" ? "B" : "A",
+        fileName: String(record.fileName || ""), mimeType: String(record.mimeType || "application/pdf"),
+        updatedAt: Number(record.updatedAt || 0), page: Number(record.page || 1),
+        shelfImage: Boolean(record.shelfImageKey), shelfWidth: Number(record.shelfWidth || 0) || undefined,
+        shelfHeight: Number(record.shelfHeight || 0) || undefined,
+        positions: parseJson(record.positionsJson, []), analysisVersion: Number(record.analysisVersion || 0),
+        sources
+      };
+    });
+    return Response.json({ actor, products: productsResult.results, logs: logsResult.results, picking: pickingResult.results, users: usersResult.results, pogFiles, lineConfigs: lineConfigsResult.results });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Không thể tải dữ liệu" }, { status: 500 });
   }
@@ -160,6 +179,14 @@ export async function POST(request: Request) {
         .bind(line,name,color,logo,Date.now()).run();
       await addAudit(actor, `Cập nhật layout Line ${line}: ${name}`);
       return Response.json({ ok: true });
+    }
+
+    if (action === "updatePogPage") {
+      const line = cleanLine(payload.line);
+      const side = asText(payload.side, "A") === "B" ? "B" : "A";
+      const page = Math.max(1, Math.min(99, asInt(payload.page, 1)));
+      await db.prepare("UPDATE pog_files SET page=?,updated_at=? WHERE line=? AND side=?").bind(page, Date.now(), line, side).run();
+      return Response.json({ ok: true, page });
     }
 
     return Response.json({ error: "Thao tác không hợp lệ" }, { status: 400 });

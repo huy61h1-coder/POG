@@ -53,6 +53,14 @@ CREATE TABLE `pog_files` (
 	`file_key` text NOT NULL,
 	`file_name` text NOT NULL,
 	`mime_type` text NOT NULL,
+	`shelf_image_key` text,
+	`shelf_width` integer,
+	`shelf_height` integer,
+	`positions_json` text DEFAULT '[]' NOT NULL,
+	`source_pages` text DEFAULT '' NOT NULL,
+	`analysis_version` integer DEFAULT 0 NOT NULL,
+	`page` integer DEFAULT 1 NOT NULL,
+	`sources_json` text DEFAULT '[]' NOT NULL,
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint

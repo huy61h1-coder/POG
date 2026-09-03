@@ -51,7 +51,10 @@ export async function ensureSchema() {
     db.prepare(`CREATE TABLE IF NOT EXISTS pog_files (
       id TEXT PRIMARY KEY, line TEXT NOT NULL, side TEXT NOT NULL,
       file_key TEXT NOT NULL, file_name TEXT NOT NULL, mime_type TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL, shelf_image_key TEXT, shelf_width INTEGER,
+      shelf_height INTEGER, positions_json TEXT NOT NULL DEFAULT '[]',
+      source_pages TEXT NOT NULL DEFAULT '', analysis_version INTEGER NOT NULL DEFAULT 0,
+      page INTEGER NOT NULL DEFAULT 1, sources_json TEXT NOT NULL DEFAULT '[]'
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_pog_line_side ON pog_files(line, side)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS line_configs (
@@ -59,6 +62,20 @@ export async function ensureSchema() {
       logo TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
     )`),
   ]);
+
+  // Older deployments created pog_files before the analyzed shelf image
+  // fields existed. Add those fields lazily so existing D1 databases can use
+  // the same PDF analysis pipeline without requiring a manual migration.
+  const pogColumns = await db.prepare("PRAGMA table_info(pog_files)").all<{name:string}>();
+  const knownPogColumns = new Set((pogColumns.results || []).map((column) => column.name));
+  const missingPogColumns: Array<[string,string]> = [
+    ["shelf_image_key", "TEXT"], ["shelf_width", "INTEGER"], ["shelf_height", "INTEGER"],
+    ["positions_json", "TEXT NOT NULL DEFAULT '[]'"], ["source_pages", "TEXT NOT NULL DEFAULT ''"],
+    ["analysis_version", "INTEGER NOT NULL DEFAULT 0"], ["page", "INTEGER NOT NULL DEFAULT 1"],
+    ["sources_json", "TEXT NOT NULL DEFAULT '[]'"]
+  ];
+  const alters = missingPogColumns.filter(([name]) => !knownPogColumns.has(name)).map(([name,definition]) => db.prepare(`ALTER TABLE pog_files ADD COLUMN ${name} ${definition}`));
+  if (alters.length) await db.batch(alters);
 
   const now = Date.now();
   await db.batch(defaultLineConfigs.map(([line, name, color, logo]) => db.prepare(
