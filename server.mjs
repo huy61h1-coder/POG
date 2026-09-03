@@ -196,12 +196,40 @@ function availableProducts(products) {
   return products.filter((product) => product.stock > 0 && (!product.expDate || product.expDate >= today));
 }
 
+const stockIndexCache=new WeakMap(),productSkuIndexCache=new WeakMap(),stockRowsCache=new WeakMap(),pogRowsCache=new WeakMap();
 function stockIndex(records) {
-  return new Map(records.map((record)=>[normalizeText(record.sku),record]));
+  let index=stockIndexCache.get(records);if(index)return index;
+  index=new Map(records.map((record)=>[normalizeText(record.sku),record]));stockIndexCache.set(records,index);return index;
+}
+function productSkuIndex(products) {
+  let index=productSkuIndexCache.get(products);if(index)return index;
+  index=new Map();for(const product of products){const key=normalizeText(product.sku);if(key&&!index.has(key))index.set(key,product);}productSkuIndexCache.set(products,index);return index;
 }
 function withUploadedStock(product,index) {
   const record=index.get(normalizeText(product.sku));
   return {...product,stock:record?.stock??0,sales:record?.sales??product.sales??0,stockKnown:Boolean(record),loss:0,expDate:""};
+}
+function stockRows(state) {
+  let rows=stockRowsCache.get(state);if(rows)return rows;
+  const productsBySku=productSkuIndex(state.products),rowsBySku=[];
+  for(const record of state.stockRecords){
+    const product=productsBySku.get(normalizeText(record.sku));
+    rowsBySku.push({... (product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),name:asText(record.name)||product?.name||"SKU chưa có trong Master Data",division:asText(record.division)||product?.division||"",divisionName:asText(record.divisionName)||product?.divisionName||"",department:asText(record.department)||product?.department||"",departmentName:asText(record.departmentName)||product?.departmentName||"",sales:record.sales??0,stock:record.stock,stockKnown:true,updatedAt:record.updatedAt});
+  }
+  rowsBySku.sort((a,b)=>a.sku.localeCompare(b.sku));rows=rowsBySku;stockRowsCache.set(state,rows);return rows;
+}
+function pogRows(state,pogFile) {
+  if(!pogFile)return [];
+  let byFile=pogRowsCache.get(state);if(!byFile){byFile=new Map();pogRowsCache.set(state,byFile);}
+  const cached=byFile.get(pogFile.id);if(cached)return cached;
+  const uploaded=stockIndex(state.stockRecords),lookup=productLookup(state.products),byPosition=new Map();
+  for(const position of pogFile.positions||[]){
+    const keys=[position.sku,position.barcode].map(normalizeText).filter(Boolean),master=keys.map((key)=>lookup.get(key)).find(Boolean),record=uploaded.get(keys[0])||uploaded.get(keys[1]);
+    const base=master?withUploadedStock(master,uploaded):{id:"pog-"+pogFile.id+"-"+position.number,sku:position.sku,name:position.name||"Sản phẩm đọc từ POG",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:position.barcode||position.sku,barcode:position.barcode||position.sku,line:pogFile.line||"",lineName:"",side:pogFile.side||"A",bay:1,price:0,stock:record?.stock||0,stockKnown:Boolean(record),loss:0,expDate:"",updatedAt:pogFile.updatedAt||Date.now()};
+    const product={...base,sku:position.sku||base.sku,barcode:position.barcode||base.barcode||position.sku,supplierBarcode:base.supplierBarcode||position.barcode||position.sku,name:position.name||base.name};
+    const key=normalizeText(product.sku||product.barcode);if(key&&!byPosition.has(key))byPosition.set(key,product);
+  }
+  const rows=[...byPosition.values()];byFile.set(pogFile.id,rows);return rows;
 }
 function manualCheckGroups(state) {
   const productsById=new Map(state.products.map((product)=>[product.id,product])),uploaded=stockIndex(state.stockRecords);
@@ -433,8 +461,8 @@ class StateStore {
     return this.localState;
   }
   async save(state) {
-    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords); }
-    else { try{await writeLocalState(state);this.localState=state;productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);}catch(error){this.localState=null;throw error;} }
+    if (pool) { await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);this.remoteState=state;this.remoteStateAt=Date.now();productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);stockIndexCache.delete(state.stockRecords);productSkuIndexCache.delete(state.products);stockRowsCache.delete(state);pogRowsCache.delete(state); }
+    else { try{await writeLocalState(state);this.localState=state;productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);stockIndexCache.delete(state.stockRecords);productSkuIndexCache.delete(state.products);stockRowsCache.delete(state);pogRowsCache.delete(state);}catch(error){this.localState=null;throw error;} }
   }
   async mutate(callback) {
     const run = async () => {
@@ -446,7 +474,7 @@ class StateStore {
           const state = ensureStateShape(result.rows[0].state);
           const value = await callback(state);
           await client.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE", [JSON.stringify(state)]);
-          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);
+          await client.query("COMMIT");this.remoteState=state;this.remoteStateAt=Date.now();productSummaryCache.delete(state);productApiCache.delete(state.products);productLookupCache.delete(state.products);productSearchIndexCache.delete(state.products);stockApiCache.delete(state.stockRecords);stockIndexCache.delete(state.stockRecords);productSkuIndexCache.delete(state.products);stockRowsCache.delete(state);pogRowsCache.delete(state);
           return value;
         } catch (error) {
           await client.query("ROLLBACK");
@@ -723,13 +751,7 @@ app.get("/api/products", async(req,res,next)=>{
     // Khi mở POG, danh sách bên trái phải bắt đầu từ các dòng đã đọc trong
     // chính file POG. Master Data/Stock chỉ bổ sung thông tin nếu mã khớp.
     if(pogId){
-      const positions=pogFile?.positions||[],lookup=productLookup(state.products),byPosition=new Map();
-      for(const position of positions){
-        const keys=[position.sku,position.barcode].map(normalizeText).filter(Boolean),master=keys.map((key)=>lookup.get(key)).find(Boolean),record=uploaded.get(keys[0])||uploaded.get(keys[1]),base=master?withUploadedStock(master,uploaded):{id:"pog-"+pogId+"-"+position.number,sku:position.sku,name:position.name||"Sản phẩm đọc từ POG",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:position.barcode||position.sku,barcode:position.barcode||position.sku,line:pogFile?.line||"",lineName:"",side:pogFile?.side||"A",bay:1,price:0,stock:record?.stock||0,stockKnown:Boolean(record),loss:0,expDate:"",updatedAt:pogFile?.updatedAt||Date.now()};
-        const product={...base,sku:position.sku||base.sku,barcode:position.barcode||base.barcode||position.sku,supplierBarcode:base.supplierBarcode||position.barcode||position.sku,name:position.name||base.name};
-        const key=normalizeText(product.sku||product.barcode);if(key&&!byPosition.has(key))byPosition.set(key,product);
-      }
-      const ordered=[...byPosition.values()].filter((product)=>!query||productSearchText(product).includes(query)),payload={products:ordered.slice(start,start+pageSize),total:ordered.length,page,pageSize,matchedLines:[pogFile?.line||""]};
+      const ordered=pogRows(state,pogFile).filter((product)=>!query||productSearchText(product).includes(query)),payload={products:ordered.slice(start,start+pageSize),total:ordered.length,page,pageSize,matchedLines:[pogFile?.line||""]};
       if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);return res.set("Cache-Control","no-store").json(payload);
     }
     if(query&&!line&&!side&&!skuSet.size&&!pogId&&stock==="all"&&!sort){const exact=productLookup(state.products).get(query);if(exact){const product=withUploadedStock(exact,uploaded);return res.set("Cache-Control","no-store").json({products:[product],total:1,page:1,pageSize:1,matchedLines:[product.line]});}}
@@ -779,9 +801,8 @@ app.get("/api/stock", async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const query=normalizeText(asText(req.query.q).slice(0,200)),page=Math.max(1,asInt(req.query.page,1)),pageSize=Math.max(1,Math.min(200,asInt(req.query.pageSize,100))),start=(page-1)*pageSize,cacheKey=[query,page,pageSize,asInt(state.stockImport?.updatedAt,0)].join("|"),apiCache=getStockApiCache(state.stockRecords),cached=apiCache.get(cacheKey);if(cached)return res.set("Cache-Control","no-store").json(cached);
-    const bySku=stockIndex(state.stockRecords),productsBySku=new Map(state.products.map((product)=>[normalizeText(product.sku),product]));
-    const rows=[];for(const record of state.stockRecords){const product=productsBySku.get(normalizeText(record.sku)),row={...(product||{id:"stock-"+record.sku,sku:record.sku,name:"SKU chưa có trong Master Data",line:"--",lineName:"",side:"",bay:0}),name:asText(record.name)||product?.name||"SKU chưa có trong Master Data",division:asText(record.division)||product?.division||"",divisionName:asText(record.divisionName)||product?.divisionName||"",department:asText(record.department)||product?.department||"",departmentName:asText(record.departmentName)||product?.departmentName||"",sales:record.sales??0,stock:record.stock,stockKnown:true,updatedAt:record.updatedAt};if(!query||productSearchText(row).includes(query))rows.push(row);}
-    rows.sort((a,b)=>a.sku.localeCompare(b.sku));const payload={products:rows.slice(start,start+pageSize),total:rows.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!productsBySku.has(normalizeText(row.sku))).length};if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);res.set("Cache-Control","no-store").json(payload);
+    const rows=stockRows(state),bySku=productSkuIndex(state.products),matched=query?productSearchCandidates(query,rows).map(({product})=>product):rows;
+    const payload={products:matched.slice(start,start+pageSize),total:matched.length,page,pageSize,stockImport:state.stockImport,unmatched:state.stockRecords.length-bySku.size+rows.filter((row)=>!bySku.has(normalizeText(row.sku))).length};if(apiCache.size>100)apiCache.delete(apiCache.keys().next().value);apiCache.set(cacheKey,payload);res.set("Cache-Control","no-store").json(payload);
   } catch(error){next(error);}
 });
 
@@ -1066,6 +1087,11 @@ app.post("/api/pog", requireManager, upload.fields([{name:"file",maxCount:1},{na
 });
 
 await store.init();
+// Warm the read-only indexes before accepting browser traffic. Without this,
+// the first search/Stock/POG request pays the cost of scanning tens of
+// thousands of Master Data rows and appears as a long spinner to users.
+const warmState=await store.read();
+stockIndex(warmState.stockRecords);productSkuIndex(warmState.products);productLookup(warmState.products);productSearchIndex(warmState.products);const warmStockRows=stockRows(warmState);productSearchIndex(warmStockRows);getProductSummary(warmState);for(const file of warmState.pogFiles)if(file.positions?.length)pogRows(warmState,file);
 app.use("/api",(_req,res)=>res.status(404).json({error:"API không tồn tại"}));
 if(production)app.use(express.static(path.join(root,"dist")));
 else { const {createServer:createViteServer}=await import("vite");const vite=await createViteServer({root,server:{middlewareMode:true},appType:"spa"});app.use(vite.middlewares); }

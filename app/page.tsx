@@ -85,6 +85,15 @@ const productImageUrls = (value?:string) => [...new Set(String(value||"").split(
 const productImageUrl = (value?:string) => productImageUrls(value)[0]||"";
 const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
 const POG_ANALYSIS_VERSION=10;
+const STORE_SNAPSHOT_KEY="fulfillment-store-snapshot-v1";
+function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
+  if(typeof window==="undefined")return null;
+  try {
+    const parsed=JSON.parse(window.sessionStorage.getItem(STORE_SNAPSHOT_KEY)||"null") as {data?:StoreData;cachedAt?:number}|null;
+    if(!parsed?.data?.actor||!Array.isArray(parsed.data.pogFiles)||!Number.isFinite(parsed.cachedAt)||Date.now()-(parsed.cachedAt||0)>5*60_000)return null;
+    return {data:parsed.data,cachedAt:parsed.cachedAt||0};
+  } catch { return null; }
+}
 
 type PogAnalysis = { image:Blob; width:number; height:number; positions:PogPosition[]; sourcePages:number[] };
 type PdfTextToken = { text:string; x:number; y:number; fontSize:number };
@@ -336,6 +345,7 @@ export default function Home() {
   const pogAutoAnalysisRef = useRef(new Set<string>());
   const searchCacheRef = useRef(new Map<string,ProductPage>());
   const productViewCacheRef = useRef(new Map<string,ProductPage>());
+  const pogSearchCacheRef = useRef(new Map<string,{products:Product[];total:number}>());
   // Keep the last successful suggestions visible while a new query is being
   // resolved. This prevents the search popover from flashing a large blank
   // loading panel on every keystroke.
@@ -355,18 +365,22 @@ export default function Home() {
     try {
       const response = await fetch("/api/store?includeProducts=0", { cache:"no-store" });
       const payload = await response.json() as StoreData & {error?:string;setupRequired?:boolean};
-      if(response.status===401){setData(null);setAuthMode(payload.setupRequired?"setup":"login");setError("");return;}
+      if(response.status===401){setData(null);window.sessionStorage.removeItem(STORE_SNAPSHOT_KEY);setAuthMode(payload.setupRequired?"setup":"login");setError("");return;}
       if (!response.ok) throw new Error(payload.error || "Không thể tải dữ liệu");
-      setData(payload);setAuthMode(null);setError("");setLastSyncedAt(Date.now());
+      const syncedAt=Date.now();setData(payload);setAuthMode(null);setError("");setLastSyncedAt(syncedAt);try{window.sessionStorage.setItem(STORE_SNAPSHOT_KEY,JSON.stringify({cachedAt:syncedAt,data:payload}));}catch{/* Storage can be disabled or full; live data still works. */}
       const saved=window.localStorage.getItem("fulfillment-master-job:"+payload.actor.userId);if(saved)setImportJob((current)=>current||{jobId:saved,status:"queued",phase:"Đang khôi phục tiến độ nhập dữ liệu",percent:5,processedRows:0,totalRows:0,fileName:"Master Data",result:null,error:""});
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Không thể tải dữ liệu"); }
     finally { if (!quiet) setBusy(false); }
   },[]);
 
+  useEffect(()=>{
+    const cached=readStoreSnapshot();
+    if(cached){setData(cached.data);setLastSyncedAt(cached.cachedAt);}
+  },[]);
   useEffect(() => {
     if(authMode)return;
     const initial = window.setTimeout(() => void loadData(),0);
-    const timer = window.setInterval(() => void loadData(true),15000);
+    const timer = window.setInterval(() => void loadData(true),30000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
   },[loadData,authMode]);
   useEffect(() => { document.documentElement.dataset.theme=theme; window.localStorage.setItem("fulfillment-theme",theme); },[theme]);
@@ -404,9 +418,10 @@ export default function Home() {
   useEffect(()=>{
     if(!actorUserId||!pogLine||!pogSide)return;
     const requestKey=[actorUserId,pogLine,pogSide,pogSearch.trim(),productRefresh,activePogUpdated].join("|");
+    const cached=pogSearchCacheRef.current.get(requestKey);if(cached){setPogProducts(cached.products);setPogTotal(cached.total);setPogResultKey(requestKey);return;}
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
       const params=new URLSearchParams({pageSize:"200",pogId:activePogFile?.id||"__no_pog_position__"});if(pogSearch.trim())params.set("q",pogSearch.trim());
-      try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage;if(response.ok){setPogProducts(payload.products.map(withPogLocation));setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
+      try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage;if(response.ok){const products=payload.products.map(withPogLocation);if(pogSearchCacheRef.current.size>80)pogSearchCacheRef.current.delete(pogSearchCacheRef.current.keys().next().value as string);pogSearchCacheRef.current.set(requestKey,{products,total:payload.total});setPogProducts(products);setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
     },pogSearch.trim()?180:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
   },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogFile?.id,withPogLocation]);
@@ -469,7 +484,7 @@ export default function Home() {
 
   const logout = async () => {
     setBusy(true);
-    try{await fetch("/api/auth/logout",{method:"POST"});}finally{setSettingsOpen(false);setImportJob(null);setLoginOpen(false);setAuthMode(null);await loadData(true);setBusy(false);}
+    try{await fetch("/api/auth/logout",{method:"POST"});}finally{window.sessionStorage.removeItem(STORE_SNAPSHOT_KEY);setSettingsOpen(false);setImportJob(null);setLoginOpen(false);setAuthMode(null);setData(null);await loadData(true);setBusy(false);}
   };
 
   const productRequestKey=[productSource,normalizedProductQuery,effectiveStock,productSort,productPage,productPageSize,productRefresh].join("|"),productsCurrent=productResultKey===productRequestKey;
@@ -595,7 +610,7 @@ export default function Home() {
         </div>
         <button className="top-order" onClick={()=>{setTab("ORDER");setProductPage(1);}}><span>ĐƠN SOẠN</span><b>{pickedCount}/{data.picking.length}</b><i><em style={{width:progress+"%"}}/></i></button>
         {importActive&&<button className="import-job-chip" onClick={()=>{setTab("PRODUCTS");setProductPage(1);}} title={importJob?.phase}><i/><span>Đang nhập Excel<b>{Math.round(importJob?.percent||0)}%</b></span></button>}
-        <div className={"sync-chip "+(error?"offline":"online")} title={error||"Dữ liệu được tự động cập nhật mỗi 15 giây"}><i/>{error?"Mất kết nối":lastSyncedAt?"Đã đồng bộ":"Đang nối"}</div>
+        <div className={"sync-chip "+(error?"offline":"online")} title={error||"Dữ liệu được tự động cập nhật mỗi 30 giây"}><i/>{error?"Mất kết nối":lastSyncedAt?"Đã đồng bộ":"Đang nối"}</div>
         {data.actor.userId==="guest"?<button className="top-login-button" onClick={()=>{setAuthMode("login");setLoginOpen(true);setError("");}}>Đăng nhập</button>:<button className="user-chip" onClick={()=>setSettingsOpen(true)}><span>{data.actor.name.slice(0,2).toUpperCase()}</span><b>{data.actor.name}<small>{data.actor.role}</small></b></button>}
       </header>
 
