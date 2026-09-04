@@ -565,6 +565,7 @@ export default function Home() {
   const searchMatches = query.length >= 2 ? (productsCurrent?products:searchMatchesCacheRef.current).slice(0,8) : [];
   const pickedCount = (data?.picking||[]).filter((p)=>Boolean(p.picked)).length;
   const progress = data?.picking?.length ? Math.round(pickedCount/data.picking.length*100) : 0;
+  const unassignedOrderCount = data ? groupOrderItems(data.assignedPicking.filter((item)=>item.workflowStatus==="unassigned")).length : 0;
   const activePog = activePogFile;
   const pogRequestKey=[actorUserId||"",pogLine||"",pogSide||"",pogSearch.trim(),productRefresh,activePog?.updatedAt||0].join("|"),pogCurrent=pogResultKey===pogRequestKey;
   const visiblePogProducts=pogCurrent?pogProducts:[],visiblePogTotal=pogCurrent?pogTotal:0;
@@ -703,7 +704,7 @@ export default function Home() {
       </header>
 
       <div className="ops-body">
-        <nav className="side-nav">{menu.map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span><AppIcon name={item.id}/></span>{item.label}{item.id==="ORDER"&&data.picking.length>0?<b>{data.picking.length}</b>:null}</button>)}</nav>
+        <nav className="side-nav">{menu.map((item)=><button key={item.id} className={tab===item.id?"active":""} onClick={()=>{setTab(item.id);setProductPage(1);}}><span><AppIcon name={item.id}/></span>{item.label}{item.id==="ORDER"&&unassignedOrderCount>0?<b>{unassignedOrderCount}</b>:null}</button>)}</nav>
         <section className="ops-content">
           {(["PRODUCTS","CHECK_STOCK"] as Tab[]).includes(tab)&&<OpsFilters stock={stockFilter} visible={products.length} total={productResult.total} onStock={(value)=>{setStockFilter(value);setProductPage(1);}} onClear={()=>{setQuery("");setStockFilter("all");setProductPage(1);}}/>}
           {tab==="DASHBOARD"&&<Dashboard products={data.alertProducts.map(withPogLocation)} totalProducts={data.productTotal} logs={data.logs} totals={data.productStats} assignedItems={data.assignedPicking.map(withPogLocation)} history={(data.orderHistory||[]).map(withPogLocation)} onGo={(next,stock)=>{setTab(next);setStockFilter(stock||"all");setQuery("");setProductPage(1);}}/>}
