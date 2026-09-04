@@ -85,7 +85,7 @@ const normalizeScannedBarcode = (rawValue:string) => {
 const productImageUrls = (value?:string) => [...new Set(String(value||"").split("|").map((item)=>item.trim()).filter(Boolean))].slice(0,32);
 const productImageUrl = (value?:string) => productImageUrls(value)[0]||"";
 const isLinkedPogPosition = (position:PogPosition) => position.linked !== false && (position.x !== 0 || position.y !== 0);
-const canManage = (role?:Role) => role === "ADMIN" || role === "MANAGER";
+const canManage = (role?:Role) => { const normalized=String(role||"").toUpperCase(); return normalized === "ADMIN" || normalized === "MANAGER"; };
 const POG_ANALYSIS_VERSION=14;
 const STORE_SNAPSHOT_KEY="fulfillment-store-snapshot-v1";
 function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {

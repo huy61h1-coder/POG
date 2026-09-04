@@ -72,7 +72,7 @@ async function writeLocalState(state) {
 function asText(value, fallback = "") { return typeof value === "string" ? value.trim() : fallback; }
 function asInt(value, fallback = 0) { const n = Number(value); return Number.isFinite(n) ? Math.trunc(n) : fallback; }
 function cleanLine(value) { const digits=asText(value, "01").replace(/\D/g, ""); return (digits||"1").padStart(2, "0").slice(0, 3); }
-function canManage(role) { return role === "ADMIN" || role === "MANAGER"; }
+function canManage(role) { const normalized=String(role||"").toUpperCase(); return normalized === "ADMIN" || normalized === "MANAGER"; }
 function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[đĐ]/g,"d").toLowerCase(); }
 function normalizePhone(value) { return asText(value).replace(/[^\d+]/g,"").slice(0,24); }
 function localDateKey(value=Date.now()) {
