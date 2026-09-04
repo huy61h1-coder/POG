@@ -911,7 +911,7 @@ function OrderViewLegacy({items,assignedItems,history,onExportHistory,onToggle,o
   const shelfRoute=(product:PickItem)=>{const index=route.indexOf(product.shelfLine||"");return index<0?999:index;};
   const sorted=[...items].sort((a,b)=>orderDateKey(a.orderDate||a.createdAt).localeCompare(orderDateKey(b.orderDate||b.createdAt))||Number(Boolean(a.picked))-Number(Boolean(b.picked))||shelfRoute(a)-shelfRoute(b)||(a.shelfSide||"Z").localeCompare(b.shelfSide||"Z")||(a.shelfPosition||0)-(b.shelfPosition||0));
   const pickedUnits=items.filter((p)=>Boolean(p.picked)).reduce((sum,p)=>sum+p.quantity,0),totalUnits=items.reduce((sum,p)=>sum+p.quantity,0),percent=totalUnits?Math.round(pickedUnits/totalUnits*100):0,next=sorted.find((p)=>!p.picked);
-  const assignedCustomerCount=new Set(assignedItems.map((item)=>`${(item.customerName||"").trim().toLocaleLowerCase()}|${item.customerPhone||""}`)).size;
+  const assignedCustomerCount=new Set(assignedItems.map((item)=>{const phone=(item.customerPhone||"").replace(/\D/g,""),fallback=normalize((item.customerName||"").trim())||"chua dat ten khach",groupKey=phone?"phone:"+phone:"name:"+fallback;return orderDateKey(item.orderDate||item.createdAt)+"|"+groupKey;})).size;
   const dateTotals=new Map<string,number>();
   for(const item of sorted){const date=orderDateKey(item.orderDate||item.createdAt);dateTotals.set(date,(dateTotals.get(date)||0)+1);}
   const finish=()=>{if(next&&!window.confirm("Đơn vẫn còn sản phẩm chưa lấy. Bạn có chắc muốn hoàn tất và xóa đơn?"))return;onClear()};
