@@ -104,6 +104,17 @@ async function readApiJson<T>(response:Response):Promise<T> {
     throw new Error(`Máy chủ trả về dữ liệu không hợp lệ${response.status?` (${response.status})`:""}.`);
   }
 }
+async function fetchApi(input:RequestInfo|URL,init?:RequestInit):Promise<Response> {
+  const retryable=!init?.method||["GET","HEAD"].includes(init.method.toUpperCase());
+  let response=await fetch(input,init);
+  if(!retryable||![502,503,504].includes(response.status))return response;
+  for(const delay of [500,1200]){
+    await new Promise<void>((resolve)=>window.setTimeout(resolve,delay));
+    response=await fetch(input,init);
+    if(![502,503,504].includes(response.status))break;
+  }
+  return response;
+}
 function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
   if(typeof window==="undefined")return null;
   try {
@@ -456,7 +467,7 @@ export default function Home() {
   const loadData = useCallback(async (quiet=false) => {
     if (!quiet) setBusy(true);
     try {
-      const response = await fetch("/api/store?includeProducts=0", { cache:"no-store" });
+      const response = await fetchApi("/api/store?includeProducts=0", { cache:"no-store" });
       const payload = await readApiJson<StoreData & {error?:string;setupRequired?:boolean}>(response);
       if(response.status===401){setData(null);window.sessionStorage.removeItem(STORE_SNAPSHOT_KEY);setAuthMode(payload.setupRequired?"setup":"login");setError("");return;}
       if (!response.ok) throw new Error(payload.error || "Không thể tải dữ liệu");
@@ -496,7 +507,7 @@ export default function Home() {
         if(normalizedProductQuery)params.set("q",normalizedProductQuery);if(productSort)params.set("sort",productSort);
         const endpoint=(productSource==="stock"?"/api/stock?":"/api/products?")+params,cacheKey=endpoint;
         const cached=searchCacheRef.current.get(cacheKey);if(cached){productViewCacheRef.current.set(requestKey,cached);if(normalizedProductQuery)searchMatchesCacheRef.current=cached.products.slice(0,8).map(withPogLocation);setProductResult({...cached,products:cached.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
-        const response=await fetch(endpoint,{cache:"no-store",signal:controller.signal}),payload=await readApiJson<ProductPage&{error?:string}>(response);
+        const response=await fetchApi(endpoint,{cache:"no-store",signal:controller.signal}),payload=await readApiJson<ProductPage&{error?:string}>(response);
         if(!response.ok)throw new Error(payload.error||"Không thể tải danh sách sản phẩm");
         if(searchCacheRef.current.size>80)searchCacheRef.current.delete(searchCacheRef.current.keys().next().value as string);searchCacheRef.current.set(cacheKey,payload);
         if(productViewCacheRef.current.size>100)productViewCacheRef.current.delete(productViewCacheRef.current.keys().next().value as string);productViewCacheRef.current.set(requestKey,payload);
@@ -514,7 +525,7 @@ export default function Home() {
     const cached=pogSearchCacheRef.current.get(requestKey);if(cached){setPogProducts(cached.products);setPogTotal(cached.total);setPogResultKey(requestKey);return;}
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
       const params=new URLSearchParams({pageSize:"200",pogId:activePogFile?.id||"__no_pog_position__"});if(pogSearch.trim())params.set("q",pogSearch.trim());
-      try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await readApiJson<ProductPage>(response);if(response.ok){const products=payload.products.map(withPogLocation);if(pogSearchCacheRef.current.size>80)pogSearchCacheRef.current.delete(pogSearchCacheRef.current.keys().next().value as string);pogSearchCacheRef.current.set(requestKey,{products,total:payload.total});setPogProducts(products);setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
+      try{const response=await fetchApi("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await readApiJson<ProductPage>(response);if(response.ok){const products=payload.products.map(withPogLocation);if(pogSearchCacheRef.current.size>80)pogSearchCacheRef.current.delete(pogSearchCacheRef.current.keys().next().value as string);pogSearchCacheRef.current.set(requestKey,{products,total:payload.total});setPogProducts(products);setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
     },pogSearch.trim()?180:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
   },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogFile?.id,withPogLocation]);
@@ -523,7 +534,7 @@ export default function Home() {
     let stopped=false,timer=0,failures=0;
     const poll=async()=>{
       try{
-        const response=await fetch("/api/master-data/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await readApiJson<MasterImportJob&{error?:string}>(response);
+        const response=await fetchApi("/api/master-data/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await readApiJson<MasterImportJob&{error?:string}>(response);
         if(response.status===401){setData(null);setAuthMode("login");return;}
         if(!response.ok){const cause=new Error(payload.error||"Không thể theo dõi tiến độ nhập dữ liệu") as Error&{terminal?:boolean};cause.terminal=[403,404].includes(response.status);throw cause;}
         failures=0;
@@ -538,7 +549,7 @@ export default function Home() {
   useEffect(()=>{
     const jobId=stockImportJob?.jobId;if(!actorUserId||!jobId||stockImportJob.status==="uploading"||["completed","failed"].includes(stockImportJob.status))return;
     let stopped=false,timer=0;
-    const poll=async()=>{try{const response=await fetch("/api/stock/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await readApiJson<StockImportJob&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể theo dõi file Stock");if(stopped)return;setStockImportJob(payload);if(payload.status==="completed"){clearProductCaches();setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã cập nhật tồn kho từ "+(payload.result?.imported||0)+" SKU");return;}if(payload.status==="failed"){setToast(payload.error||"Không thể nhập file Stock");return;}timer=window.setTimeout(()=>void poll(),900);}catch(cause){if(!stopped){setStockImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:cause instanceof Error?cause.message:""}:current);timer=window.setTimeout(()=>void poll(),3000);}}};void poll();return()=>{stopped=true;window.clearTimeout(timer);};
+    const poll=async()=>{try{const response=await fetchApi("/api/stock/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await readApiJson<StockImportJob&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể theo dõi file Stock");if(stopped)return;setStockImportJob(payload);if(payload.status==="completed"){clearProductCaches();setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã cập nhật tồn kho từ "+(payload.result?.imported||0)+" SKU");return;}if(payload.status==="failed"){setToast(payload.error||"Không thể nhập file Stock");return;}timer=window.setTimeout(()=>void poll(),900);}catch(cause){if(!stopped){setStockImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:cause instanceof Error?cause.message:""}:current);timer=window.setTimeout(()=>void poll(),3000);}}};void poll();return()=>{stopped=true;window.clearTimeout(timer);};
   },[actorUserId,clearProductCaches,stockImportJob?.jobId,stockImportJob?.status,loadData]);
 
   const mutate = async (action:string, payload:Record<string,unknown>={}) => {
@@ -609,7 +620,7 @@ export default function Home() {
     const selected=/^\d{4}-\d{2}$/.test(month)?month:orderDateKey(Date.now()).slice(0,7),link=document.createElement("a");
     link.href="/api/orders/export.xlsx?month="+encodeURIComponent(selected);link.download="Don_soan_khach_hang_"+selected+".xlsx";document.body.appendChild(link);link.click();link.remove();
   };
-  const loadDailyReports=useCallback(async(month:string)=>{setReportsBusy(true);try{const response=await fetch("/api/daily-reports?month="+encodeURIComponent(month),{cache:"no-store"}),payload=await readApiJson<{reports?:DailyReport[];error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tải báo cáo ngày");setDailyReports(payload.reports||[]);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải báo cáo ngày");}finally{setReportsBusy(false);}},[]);
+  const loadDailyReports=useCallback(async(month:string)=>{setReportsBusy(true);try{const response=await fetchApi("/api/daily-reports?month="+encodeURIComponent(month),{cache:"no-store"}),payload=await readApiJson<{reports?:DailyReport[];error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tải báo cáo ngày");setDailyReports(payload.reports||[]);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải báo cáo ngày");}finally{setReportsBusy(false);}},[]);
   useEffect(()=>{if(tab==="DAILY_REPORT"&&data)void loadDailyReports(reportMonth);},[tab,data,reportMonth,loadDailyReports]);
   const saveDailyReport=async(report:Omit<DailyReport,"id"|"createdAt"|"updatedAt"|"createdBy">)=>{if(await mutate("upsertDailyReport",{report})){await loadDailyReports(reportMonth);}};
   const exportDailyReports=(month:string)=>{const selected=/^\d{4}-\d{2}$/.test(month)?month:reportMonth,link=document.createElement("a");link.href="/api/daily-reports/export.xlsx?month="+encodeURIComponent(selected);link.download="Bao_cao_ngay_"+selected+".xlsx";document.body.appendChild(link);link.click();link.remove();};
@@ -641,7 +652,7 @@ export default function Home() {
   const addManualCheck=(kind:ManualCheckKind)=>setManualCheckModal(kind);
   const searchManualProducts=async(search:string):Promise<Product[]>=>{
     const params=new URLSearchParams({page:"1",pageSize:"50"});if(search.trim())params.set("q",search.trim());
-    const response=await fetch("/api/products?"+params,{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);
+    const response=await fetchApi("/api/products?"+params,{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);
     if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");
     const lossById=new Map((manualCheckLossProducts||[]).map((item)=>[item.id,item])),dateById=new Map((data.manualChecks.expiry||[]).map((item)=>[item.id,item]));
     return payload.products.map((product)=>{const lossCheck=lossById.get(product.id),dateCheck=dateById.get(product.id);return withPogLocation({...product,manualStock:lossCheck?.manualStock??(lossCheck?.stockKnown?lossCheck.stock:undefined),manualLoss:lossCheck?.manualLoss??(lossCheck?.loss||undefined),inboundDate:dateCheck?.inboundDate,withdrawDate:dateCheck?.withdrawDate||dateCheck?.expDate,expDate:dateCheck?.withdrawDate||dateCheck?.expDate||product.expDate});});
@@ -652,9 +663,9 @@ export default function Home() {
 
   const openProductOnMap = (product:Product,keepQuery=false) => { const location=pogLocationFor(product);if(!location){setToast("SKU này chưa được gán vị trí kệ từ POG.");return;}setPogModal({line:location.line,side:location.side,selectedId:product.id});setPogSearch(product.sku);if(!keepQuery)setQuery("");setProductPage(1); };
   const quickAdd = async (product:Product,keepQuery=false) => { if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}if(await mutate("addPick",{productId:product.id,quantity:1})){if(!keepQuery)setQuery("");setProductPage(1);} };
-  const handleBarcode = async (rawValue:string,keepQuery=false) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact,keepQuery);else if(payload.products[0])openProductOnMap(payload.products[0],keepQuery);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
+  const handleBarcode = async (rawValue:string,keepQuery=false) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetchApi("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact,keepQuery);else if(payload.products[0])openProductOnMap(payload.products[0],keepQuery);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
   const handleSearchEnter = async () => { await handleBarcode(query); };
-  const loadPogSourceFiles=async(record:PogFile)=>{const sources=record.sources?.length?record.sources:[{fileName:record.fileName,mimeType:record.mimeType}],files:File[]=[];for(let index=0;index<sources.length;index++){const response=await fetch(`/api/pog?id=${encodeURIComponent(record.id)}&source=${index}`,{cache:"no-store"});if(!response.ok)throw new Error("Không thể đọc file POG "+(index+1));const blob=await response.blob(),source=sources[index];files.push(new File([blob],source.fileName,{type:source.mimeType}));}return files;};
+  const loadPogSourceFiles=async(record:PogFile)=>{const sources=record.sources?.length?record.sources:[{fileName:record.fileName,mimeType:record.mimeType}],files:File[]=[];for(let index=0;index<sources.length;index++){const response=await fetchApi(`/api/pog?id=${encodeURIComponent(record.id)}&source=${index}`,{cache:"no-store"});if(!response.ok)throw new Error("Không thể đọc file POG "+(index+1));const blob=await response.blob(),source=sources[index];files.push(new File([blob],source.fileName,{type:source.mimeType}));}return files;};
   const savePogAnalysis=async(file:File,line:string,side:"A"|"B",analysis:PogAnalysis|null,mode:"replace"|"append"|"reanalyze"="replace")=>{const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);form.set("mode",mode);if(analysis){form.set("shelfImage",analysis.image,`pog-${line}${side}-shelf.webp`);form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));form.set("analysisVersion",String(POG_ANALYSIS_VERSION));}const response=await fetch("/api/pog",{method:"POST",body:form}),result=await readApiJson<{error?:string;mappedCount?:number;analyzedPages?:number;fileCount?:number}>(response);if(!response.ok)throw new Error(result.error||"Không thể tải POG");return result;};
   const uploadPogFor = async (file:File|undefined,line:string,side:"A"|"B",silent=false,append=false,analysisMode:PogAnalysisMode="auto") => {
     if(!file)return false;if(!silent){setBusy(true);setPogUploadBusy(true);}
@@ -694,7 +705,7 @@ export default function Home() {
     } catch(cause){setSuggestError(cause instanceof Error?cause.message:"Không thể phân tích lúc này.");}
     finally{setSuggestBusy(false);}
   };
-  const openSuggested=async(item:AiSuggestion)=>{try{const response=await fetch("/api/products?id="+encodeURIComponent(item.productId),{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);if(!response.ok||!payload.products[0])throw new Error(payload.error||"Sản phẩm không còn trong danh sách");openProductOnMap(payload.products[0]);}catch(cause){setToast(cause instanceof Error?cause.message:"Sản phẩm không còn trong danh sách");}};
+  const openSuggested=async(item:AiSuggestion)=>{try{const response=await fetchApi("/api/products?id="+encodeURIComponent(item.productId),{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);if(!response.ok||!payload.products[0])throw new Error(payload.error||"Sản phẩm không còn trong danh sách");openProductOnMap(payload.products[0]);}catch(cause){setToast(cause instanceof Error?cause.message:"Sản phẩm không còn trong danh sách");}};
   const addSuggested=async(item:AiSuggestion)=>{if(item.stock===0){setToast("Sản phẩm đang hết hàng");return;}await mutate("addPick",{productId:item.productId,quantity:item.quantity});};
 
   if (!data && authMode) return <AuthScreen mode={authMode} busy={busy} error={error} onSubmit={authenticate}/>;
