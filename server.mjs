@@ -233,9 +233,12 @@ async function readPersistentDailyReports(month){
 }
 function purchaseFromStorageRow(row){return {id:asText(row.source_key),period:asText(row.period),phone:normalizePhone(row.phone),customerName:asText(row.customer_name),address:asText(row.address),date:asText(row.purchase_date),invoiceNumber:asText(row.invoice_number),invoiceValue:Number(row.invoice_value)||0,products:asText(row.products),sourceName:asText(row.source_name),sourceRow:asInt(row.source_row),updatedAt:asInt(row.updated_at,Date.now())};}
 function purchaseRecordKey(record){return [asText(record.period),normalizePhone(record.phone),asText(record.date),asText(record.invoiceNumber),asInt(record.rowNumber,record.sourceRow)].join("|").slice(0,500);}
-async function readPersistentPurchaseHistory(fallback=[]){
+async function readPersistentPurchaseHistory(fallback=[],year=""){
   if(!pool||!purchaseStorageReady)return fallback;
-  const result=await pool.query("SELECT source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at FROM fulfillment_purchase_history ORDER BY purchase_date DESC, source_row ASC");
+  const scope=/^\d{4}$/.test(asText(year));
+  const result=scope
+    ?await pool.query("SELECT source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at FROM fulfillment_purchase_history WHERE period LIKE $1 ORDER BY purchase_date DESC, source_row ASC",[asText(year)+"-%"])
+    :await pool.query("SELECT source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at FROM fulfillment_purchase_history ORDER BY purchase_date DESC, source_row ASC");
   return result.rows.map(purchaseFromStorageRow);
 }
 async function upsertPersistentPurchaseHistory(records,sourceName){
@@ -674,7 +677,7 @@ class StateStore {
     // Keep one normalized in-memory snapshot for short read bursts (typing in
     // search, opening POG, switching filters). Mutations refresh it immediately,
     // so a longer TTL avoids reparsing the full Master Data JSON on every key.
-    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(includeSidecars&&customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);if(includeSidecars&&purchaseStorageReady)fresh.purchaseHistory=await readPersistentPurchaseHistory(fresh.purchaseHistory);if(includeSidecars){this.remoteState=fresh;this.remoteStateAt=Date.now();}return fresh; }
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(includeSidecars&&customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);if(includeSidecars){this.remoteState=fresh;this.remoteStateAt=Date.now();}return fresh; }
     if(!this.localState){
       try { this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8"))); }
       catch(error){
@@ -721,6 +724,10 @@ class StateStore {
   replacePurchaseHistory(records) {
     if(this.remoteState)this.remoteState.purchaseHistory=(Array.isArray(records)?records:[]).map((record)=>({...record}));
   }
+  removePurchasePeriod(period) {
+    if(this.remoteState)this.remoteState.purchaseHistory=this.remoteState.purchaseHistory.filter((record)=>record.period!==period);
+    if(this.localState)this.localState.purchaseHistory=this.localState.purchaseHistory.filter((record)=>record.period!==period);
+  }
 }
 
 const store = new StateStore();
@@ -762,7 +769,7 @@ function actorFrom(req, state) {
 
 async function requireManager(req,res,next) {
   try {
-    const state=await store.read(),actor=actorFrom(req,state);
+    const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);
     if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     if(!canManage(actor.role))return res.status(403).json({error:"Cần quyền Manager hoặc Admin"});
     req.fulfillmentActor=actor;
@@ -1111,28 +1118,28 @@ app.post("/api/daily-reports",async(req,res,next)=>{
 
 app.get("/api/purchase-history",async(req,res,next)=>{
   try {
-    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory):state.purchaseHistory;
+    const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory,month.slice(0,4)):state.purchaseHistory;
     res.set("Cache-Control","no-store").json({...purchaseSummary(records,month),storage:purchaseStorageReady?"postgres":"state"});
   } catch(error){next(error);}
 });
 
 app.get("/api/purchase-history/export.xlsx",async(req,res,next)=>{
   try {
-    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory):state.purchaseHistory,summary=purchaseSummary(records,month),rows=[["SĐT","TÊN KHÁCH HÀNG","ĐỊA CHỈ","TỔNG THÁNG "+month,"TỔNG NĂM "+summary.year,"SỐ ĐƠN TRONG NĂM",...Array.from({length:12},(_,index)=>`${summary.year}-${String(index+1).padStart(2,"0")}`)],...summary.customers.map((customer)=>[customer.phone,customer.customerName,customer.address,customer.monthTotal,customer.yearTotal,customer.orders,...Array.from({length:12},(_,index)=>customer.monthlyTotals[`${summary.year}-${String(index+1).padStart(2,"0")}`]||0)])];
+    const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory,month.slice(0,4)):state.purchaseHistory,summary=purchaseSummary(records,month),rows=[["SĐT","TÊN KHÁCH HÀNG","ĐỊA CHỈ","TỔNG THÁNG "+month,"TỔNG NĂM "+summary.year,"SỐ ĐƠN TRONG NĂM",...Array.from({length:12},(_,index)=>`${summary.year}-${String(index+1).padStart(2,"0")}`)],...summary.customers.map((customer)=>[customer.phone,customer.customerName,customer.address,customer.monthTotal,customer.yearTotal,customer.orders,...Array.from({length:12},(_,index)=>customer.monthlyTotals[`${summary.year}-${String(index+1).padStart(2,"0")}`]||0)])];
     const workbook=createXlsx(rows),filename=`Lich_su_mua_hang_${month}.xlsx`;res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
   } catch(error){next(error);}
 });
 
 app.delete("/api/purchase-history",requireManager,async(req,res,next)=>{
   const period=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):"";
-  if(!period)return res.status(400).json({error:"Tháng cần xóa không hợp lệ."});
+    if(!period)return res.status(400).json({error:"Tháng cần xóa không hợp lệ."});
   try {
     if(purchaseStorageReady){
-      const deleted=await pool.query("DELETE FROM fulfillment_purchase_history WHERE period=$1",[period]),remaining=await readPersistentPurchaseHistory([]);
-      const result=await store.mutate((state)=>{state.purchaseHistory=remaining;audit(state,req.fulfillmentActor,"Xóa lịch sử mua hàng tháng "+period);return {ok:true,period,deleted:deleted.rowCount||0,total:remaining.length,storage:"postgres"};});
-      return res.status(result.status||200).json(result);
+      const deleted=await pool.query("DELETE FROM fulfillment_purchase_history WHERE period=$1",[period]),total=Number((await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_purchase_history")).rows[0]?.count)||0;
+      store.removePurchasePeriod(period);
+      return res.json({ok:true,period,deleted:deleted.rowCount||0,total,storage:"postgres"});
     }
     const result=await store.mutate((state)=>{const before=state.purchaseHistory.length;state.purchaseHistory=state.purchaseHistory.filter((record)=>record.period!==period);audit(state,req.fulfillmentActor,"Xóa lịch sử mua hàng tháng "+period);return {ok:true,period,deleted:before-state.purchaseHistory.length,total:state.purchaseHistory.length,storage:"state"};});
     return res.status(result.status||200).json(result);
@@ -1145,7 +1152,7 @@ app.post("/api/purchase-history/import",requireManager,upload.single("file"),asy
   const period=/^\d{4}-\d{2}$/.test(asText(req.body?.period))?asText(req.body.period):"";
   try {
     const parsed=await readPurchaseWorkbook(req.file.buffer,period),records=parsed.records.map((record)=>normalizedPurchaseRecord(record,period,req.file.originalname));
-    if(purchaseStorageReady){const persisted=await upsertPersistentPurchaseHistory(records,req.file.originalname),state=await store.read(),all=await readPersistentPurchaseHistory(state.purchaseHistory);store.replacePurchaseHistory(all);return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created:persisted.created,updated:persisted.updated,imported:persisted.imported,skipped:parsed.skipped,total:all.length,storage:"postgres"});}
+    if(purchaseStorageReady){const persisted=await upsertPersistentPurchaseHistory(records,req.file.originalname),total=Number((await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_purchase_history")).rows[0]?.count)||0;return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created:persisted.created,updated:persisted.updated,imported:persisted.imported,skipped:parsed.skipped,total,storage:"postgres"});}
     const result=await store.mutate((state)=>{const actor=actorFrom(req,state),current=new Map(state.purchaseHistory.map((item)=>[item.id,item]));let created=0,updated=0;for(const record of records){if(current.has(record.id))updated++;else created++;current.set(record.id,record);}state.purchaseHistory=[...current.values()].sort((left,right)=>String(right.date).localeCompare(String(left.date)));audit(state,actor,"Nhập lịch sử mua hàng "+period+": "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created,updated,imported:records.length,skipped:parsed.skipped,total:state.purchaseHistory.length,storage:"state"};});res.status(result.status||200).json(result);
   } catch(error){next(error);}
 });
