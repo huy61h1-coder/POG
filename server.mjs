@@ -1037,6 +1037,20 @@ app.get("/api/purchase-history/export.xlsx",async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
+app.delete("/api/purchase-history",requireManager,async(req,res,next)=>{
+  const period=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):"";
+  if(!period)return res.status(400).json({error:"Tháng cần xóa không hợp lệ."});
+  try {
+    if(purchaseStorageReady){
+      const deleted=await pool.query("DELETE FROM fulfillment_purchase_history WHERE period=$1",[period]),remaining=await readPersistentPurchaseHistory([]);
+      const result=await store.mutate((state)=>{state.purchaseHistory=remaining;audit(state,req.fulfillmentActor,"Xóa lịch sử mua hàng tháng "+period);return {ok:true,period,deleted:deleted.rowCount||0,total:remaining.length,storage:"postgres"};});
+      return res.status(result.status||200).json(result);
+    }
+    const result=await store.mutate((state)=>{const before=state.purchaseHistory.length;state.purchaseHistory=state.purchaseHistory.filter((record)=>record.period!==period);audit(state,req.fulfillmentActor,"Xóa lịch sử mua hàng tháng "+period);return {ok:true,period,deleted:before-state.purchaseHistory.length,total:state.purchaseHistory.length,storage:"state"};});
+    return res.status(result.status||200).json(result);
+  } catch(error){next(error);}
+});
+
 app.post("/api/purchase-history/import",requireManager,upload.single("file"),async(req,res,next)=>{
   if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel lịch sử mua hàng .xlsx"});
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
