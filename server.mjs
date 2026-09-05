@@ -621,7 +621,12 @@ app.use("/api",(req,res,next)=>{
   if(origin){try{if(new URL(origin).host!==req.get("host"))return res.status(403).json({error:"Yêu cầu không cùng nguồn"});}catch{return res.status(403).json({error:"Nguồn yêu cầu không hợp lệ"});}}
   next();
 });
-app.get("/healthz", (_req,res) => res.json({ ok:true, storage:pool?"postgres":"local-json" }));
+app.get("/healthz", (_req,res) => res.json({
+  ok:true,
+  storage:pool?"postgres":"local-json",
+  customerStorage:pool?(customerStorageReady?"postgres":"state-fallback"):"local-json",
+  customerImportReader:"bounded-xlsx-v1",
+}));
 
 const guestActor={userId:"guest",username:"guest",email:"guest",name:"Khách xem",role:"STAFF",active:true};
 function actorFrom(req, state) {
