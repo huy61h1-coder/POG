@@ -7,6 +7,27 @@
 
 set -e  # Dừng ngay nếu có lỗi
 
+# Keep application state outside the Git checkout. GitHub deploys replace code,
+# while this directory keeps customers, stock, orders, accounts and uploads.
+if [ -z "${DATABASE_URL:-}" ] && [ -z "${DATA_DIR:-}" ]; then
+  export DATA_DIR="/var/lib/pog/data"
+  echo "ℹ️  DATABASE_URL chưa có; sử dụng thư mục dữ liệu bền vững: $DATA_DIR"
+fi
+if [ -n "${DATA_DIR:-}" ]; then
+  mkdir -p "$DATA_DIR" "$DATA_DIR/master-imports"
+  # Migrate an older in-checkout store only when the persistent destination is
+  # still empty. Existing server data is never overwritten.
+  if [ "$DATA_DIR" != "$PWD/data" ] && [ ! -f "$DATA_DIR/store.json" ] && [ -f "$PWD/data/store.json" ]; then
+    cp "$PWD/data/store.json" "$DATA_DIR/store.json"
+    echo "✅ Đã chuyển store.json cũ sang thư mục dữ liệu bền vững."
+  fi
+  if [ "$DATA_DIR" != "$PWD/data" ] && [ ! -d "$DATA_DIR/uploads" ] && [ -d "$PWD/data/uploads" ]; then
+    cp -R "$PWD/data/uploads" "$DATA_DIR/uploads"
+    echo "✅ Đã chuyển file upload cũ sang thư mục dữ liệu bền vững."
+  fi
+  mkdir -p "$DATA_DIR/uploads"
+fi
+
 echo "🔄 [1/4] Pulling code mới từ GitHub..."
 git pull github codex/vibe-host-node
 

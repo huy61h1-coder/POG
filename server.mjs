@@ -16,11 +16,19 @@ import readExcelFile from "read-excel-file/node";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
 const port = Number(process.env.PORT || 3000);
-const dataDir = path.resolve(root, process.env.DATA_DIR || "data");
+const configuredDataDir = String(process.env.DATA_DIR || "").trim();
+const dataDir = path.resolve(root, configuredDataDir || "data");
 const uploadDir = path.resolve(root, process.env.UPLOAD_DIR || path.join(dataDir,"uploads"));
 const importDir = path.join(dataDir,"master-imports");
 const statePath = path.join(dataDir, "store.json");
+const stateBackupPath = path.join(dataDir, "store.backup.json");
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
+const dataDirRelativeToRoot = path.relative(root,dataDir);
+const dataDirInsideProject = !dataDirRelativeToRoot || (!dataDirRelativeToRoot.startsWith(".."+path.sep) && dataDirRelativeToRoot!=="..");
+const uploadDirRelativeToRoot = path.relative(root,uploadDir);
+const uploadDirInsideProject = !uploadDirRelativeToRoot || (!uploadDirRelativeToRoot.startsWith(".."+path.sep) && uploadDirRelativeToRoot!=="..");
+let lastLocalBackupAt=0;
+const localBackupIntervalMs=5*60_000;
 const scryptAsync = promisify(scryptCallback);
 const sessionMaxAgeSeconds = 12 * 60 * 60;
 const masterImportMaxRows = 500_000;
@@ -67,7 +75,14 @@ async function writeLocalState(state) {
     await handle.write("}");await handle.sync();
   } catch(error){await handle.close();await fs.unlink(tempPath).catch(()=>undefined);throw error;}
   await handle.close();
-  try { await fs.rename(tempPath,statePath); }
+  try {
+    if(existsSync(statePath)&&Date.now()-lastLocalBackupAt>=localBackupIntervalMs){
+      const backupTempPath=stateBackupPath+"."+randomUUID()+".tmp";
+      try { await fs.copyFile(statePath,backupTempPath);await fs.rename(backupTempPath,stateBackupPath);lastLocalBackupAt=Date.now(); }
+      catch(error){await fs.unlink(backupTempPath).catch(()=>undefined);console.warn("Could not refresh local data backup:",error instanceof Error?error.message:error);}
+    }
+    await fs.rename(tempPath,statePath);
+  }
   catch(error){await fs.unlink(tempPath).catch(()=>undefined);throw error;}
 }
 
@@ -440,6 +455,9 @@ class StateStore {
   remoteState = null;
   remoteStateAt = 0;
   async init() {
+    if(production&&!pool&&(dataDirInsideProject||uploadDirInsideProject)){
+      throw new Error("Không thể chạy production khi chưa cấu hình DATABASE_URL hoặc DATA_DIR/UPLOAD_DIR là thư mục lưu trữ bền vững nằm ngoài thư mục mã nguồn.");
+    }
     mkdirSync(uploadDir, { recursive: true });
     mkdirSync(importDir, { recursive: true });
     const staleBefore=Date.now()-6*60*60_000;
@@ -452,8 +470,13 @@ class StateStore {
       await pool.query("INSERT INTO fulfillment_state (id,state) VALUES (TRUE,$1::jsonb) ON CONFLICT (id) DO NOTHING", [JSON.stringify(initialState())]);
     } else {
       mkdirSync(path.dirname(statePath), { recursive: true });
-      if (!existsSync(statePath)) await fs.writeFile(statePath, JSON.stringify(initialState(), null, 2));
-      console.warn("DATABASE_URL is not set: using data/store.json for local demo mode.");
+      if (!existsSync(statePath)){
+        if(existsSync(stateBackupPath)){
+          await fs.copyFile(stateBackupPath,statePath);
+          console.warn("Restored local data from store.backup.json.");
+        } else await fs.writeFile(statePath, JSON.stringify(initialState(), null, 2));
+      }
+      console.warn("DATABASE_URL is not set: using persistent JSON data at "+statePath+".");
     }
     const bootstrapUsername=normalizeUsername(process.env.BOOTSTRAP_ADMIN_USERNAME),bootstrapName=asText(process.env.BOOTSTRAP_ADMIN_NAME,"Quản trị hệ thống"),bootstrapPassword=asText(process.env.BOOTSTRAP_ADMIN_PASSWORD);
     if(bootstrapUsername&&bootstrapPassword){
@@ -474,7 +497,15 @@ class StateStore {
     // search, opening POG, switching filters). Mutations refresh it immediately,
     // so a longer TTL avoids reparsing the full Master Data JSON on every key.
     if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
-    if(!this.localState)this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8")));
+    if(!this.localState){
+      try { this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8"))); }
+      catch(error){
+        if(!existsSync(stateBackupPath))throw error;
+        console.warn("Local data file is unreadable; restoring store.backup.json.");
+        this.localState=ensureStateShape(JSON.parse(await fs.readFile(stateBackupPath, "utf8")));
+        await fs.copyFile(stateBackupPath,statePath);
+      }
+    }
     return this.localState;
   }
   async save(state) {
