@@ -147,16 +147,22 @@ async function upsertPersistentCustomers(sources) {
     else byPhone.set(record.phone,record);
   }
   const records=[...byPhone.values()];let created=0,updated=0;
-  for(let start=0;start<records.length;start+=250){
-    const batch=records.slice(start,start+250),phones=batch.map((item)=>item.phone),existingResult=await pool.query("SELECT phone FROM fulfillment_customers WHERE phone=ANY($1::text[])",[phones]),existing=new Set(existingResult.rows.map((row)=>normalizePhone(row.phone)));
-    for(const record of batch){if(existing.has(record.phone))updated++;else created++;}
-    const values=[],rows=batch.map((record,rowIndex)=>{
-      const offset=rowIndex*14+1;values.push(record.id,record.phone,...customerStorageFields.map((field)=>record[field]),record.createdAt,record.updatedAt);
-      return "("+Array.from({length:14},(_,index)=>"$"+(offset+index)).join(",")+")";
-    });
-    const updates=customerStorageColumns.map((column)=>`${column}=CASE WHEN EXCLUDED.${column}<>'' THEN EXCLUDED.${column} ELSE fulfillment_customers.${column} END`).join(",");
-    await pool.query(`INSERT INTO fulfillment_customers (id,phone,${customerStorageColumns.join(",")},created_at,updated_at) VALUES ${rows.join(",")} ON CONFLICT (phone) DO UPDATE SET ${updates},updated_at=EXCLUDED.updated_at`,values);
-  }
+  const client=await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for(let start=0;start<records.length;start+=250){
+      const batch=records.slice(start,start+250),phones=batch.map((item)=>item.phone),existingResult=await client.query("SELECT phone FROM fulfillment_customers WHERE phone=ANY($1::text[])",[phones]),existing=new Set(existingResult.rows.map((row)=>normalizePhone(row.phone)));
+      for(const record of batch){if(existing.has(record.phone))updated++;else created++;}
+      const values=[],rows=batch.map((record,rowIndex)=>{
+        const offset=rowIndex*14+1;values.push(record.id,record.phone,...customerStorageFields.map((field)=>record[field]),record.createdAt,record.updatedAt);
+        return "("+Array.from({length:14},(_,index)=>"$"+(offset+index)).join(",")+")";
+      });
+      const updates=customerStorageColumns.map((column)=>`${column}=CASE WHEN EXCLUDED.${column}<>'' THEN EXCLUDED.${column} ELSE fulfillment_customers.${column} END`).join(",");
+      await client.query(`INSERT INTO fulfillment_customers (id,phone,${customerStorageColumns.join(",")},created_at,updated_at) VALUES ${rows.join(",")} ON CONFLICT (phone) DO UPDATE SET ${updates},updated_at=EXCLUDED.updated_at`,values);
+    }
+    await client.query("COMMIT");
+  } catch(error) { await client.query("ROLLBACK").catch(()=>undefined);throw error; }
+  finally { client.release(); }
   invalidateCustomerStorageCache();const customers=await readPersistentCustomers(),total=customers.length;
   return {created,updated,total,customers};
 }
