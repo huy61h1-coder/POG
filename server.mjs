@@ -114,6 +114,52 @@ async function readCustomerWorkbook(source) {
   candidates.sort((left,right)=>right.records.length-left.records.length);
   return candidates[0];
 }
+const customerStorageFields=["name","status","vatExport","memberCard","group","companyName","email","taxId","vatAddress","deliveryAddress"];
+const customerStorageColumns=["name","status","vat_export","member_card","group_name","company_name","email","tax_id","vat_address","delivery_address"];
+let customerStorageCache=null,customerStorageCacheAt=0;
+function invalidateCustomerStorageCache(){customerStorageCache=null;customerStorageCacheAt=0;}
+function normalizedCustomerRecord(source,now=Date.now()) {
+  const fields=customerFieldsFromReport(source||{});
+  if(source&&typeof source==="object"){fields.phone=asText(fields.phone)||asText(source.phone);fields.name=asText(fields.name)||asText(source.name);fields.status=asText(fields.status)||asText(source.status);fields.vatExport=asText(fields.vatExport)||asText(source.vatExport);fields.memberCard=asText(fields.memberCard)||asText(source.memberCard);fields.group=asText(fields.group)||asText(source.group);fields.companyName=asText(fields.companyName)||asText(source.companyName);fields.email=asText(fields.email)||asText(source.email);fields.taxId=asText(fields.taxId)||asText(source.taxId);fields.vatAddress=asText(fields.vatAddress)||asText(source.vatAddress);fields.deliveryAddress=asText(fields.deliveryAddress)||asText(source.deliveryAddress);}
+  const phone=normalizePhone(fields.phone);
+  if(phone.replace(/\D/g,"").length<8)return null;
+  const record={id:asText(source?.id)||randomUUID(),phone,createdAt:asInt(source?.createdAt,now),updatedAt:now};
+  for(const field of customerStorageFields)record[field]=asText(fields[field]).slice(0,4000);
+  return record;
+}
+function customerFromStorageRow(row) {
+  return {id:asText(row.id)||randomUUID(),phone:normalizePhone(row.phone),name:asText(row.name),status:asText(row.status),vatExport:asText(row.vat_export),memberCard:asText(row.member_card),group:asText(row.group_name),companyName:asText(row.company_name),email:asText(row.email),taxId:asText(row.tax_id),vatAddress:asText(row.vat_address),deliveryAddress:asText(row.delivery_address),createdAt:asInt(row.created_at,Date.now()),updatedAt:asInt(row.updated_at,Date.now())};
+}
+async function readPersistentCustomers(fallback=[]) {
+  if(!pool)return fallback;
+  if(customerStorageCache&&Date.now()-customerStorageCacheAt<30_000)return customerStorageCache.map((item)=>({...item}));
+  const result=await pool.query("SELECT id,phone,name,status,vat_export,member_card,group_name,company_name,email,tax_id,vat_address,delivery_address,created_at,updated_at FROM fulfillment_customers ORDER BY updated_at DESC, phone ASC");
+  customerStorageCache=result.rows.map(customerFromStorageRow);customerStorageCacheAt=Date.now();
+  return customerStorageCache.map((item)=>({...item}));
+}
+async function upsertPersistentCustomers(sources) {
+  if(!pool)throw new Error("Kho lưu trữ khách hàng PostgreSQL chưa được cấu hình.");
+  const byPhone=new Map(),now=Date.now();
+  for(const source of Array.isArray(sources)?sources:[]){
+    const record=normalizedCustomerRecord(source,now);if(!record)continue;
+    const previous=byPhone.get(record.phone);
+    if(previous){for(const field of customerStorageFields)if(record[field])previous[field]=record[field];}
+    else byPhone.set(record.phone,record);
+  }
+  const records=[...byPhone.values()];let created=0,updated=0;
+  for(let start=0;start<records.length;start+=250){
+    const batch=records.slice(start,start+250),phones=batch.map((item)=>item.phone),existingResult=await pool.query("SELECT phone FROM fulfillment_customers WHERE phone=ANY($1::text[])",[phones]),existing=new Set(existingResult.rows.map((row)=>normalizePhone(row.phone)));
+    for(const record of batch){if(existing.has(record.phone))updated++;else created++;}
+    const values=[],rows=batch.map((record,rowIndex)=>{
+      const offset=rowIndex*14+1;values.push(record.id,record.phone,...customerStorageFields.map((field)=>record[field]),record.createdAt,record.updatedAt);
+      return "("+Array.from({length:14},(_,index)=>"$"+(offset+index)).join(",")+")";
+    });
+    const updates=customerStorageColumns.map((column)=>`${column}=CASE WHEN EXCLUDED.${column}<>'' THEN EXCLUDED.${column} ELSE fulfillment_customers.${column} END`).join(",");
+    await pool.query(`INSERT INTO fulfillment_customers (id,phone,${customerStorageColumns.join(",")},created_at,updated_at) VALUES ${rows.join(",")} ON CONFLICT (phone) DO UPDATE SET ${updates},updated_at=EXCLUDED.updated_at`,values);
+  }
+  invalidateCustomerStorageCache();const customers=await readPersistentCustomers(),total=customers.length;
+  return {created,updated,total,customers};
+}
 const defaultLineNames = new Map(lineDefaults.map(([line,name]) => [line,name.toUpperCase()]));
 function ensureStateShape(source) {
   const state=source&&typeof source==="object"?source:initialState();
@@ -468,6 +514,9 @@ class StateStore {
     if (pool) {
       await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_state (id BOOLEAN PRIMARY KEY DEFAULT TRUE, state JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
       await pool.query("INSERT INTO fulfillment_state (id,state) VALUES (TRUE,$1::jsonb) ON CONFLICT (id) DO NOTHING", [JSON.stringify(initialState())]);
+      await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_customers (phone TEXT PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', vat_export TEXT NOT NULL DEFAULT '', member_card TEXT NOT NULL DEFAULT '', group_name TEXT NOT NULL DEFAULT '', company_name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', tax_id TEXT NOT NULL DEFAULT '', vat_address TEXT NOT NULL DEFAULT '', delivery_address TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)");
+      const stored=await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_customers"),existingCount=Number(stored.rows[0]?.count)||0;
+      if(existingCount===0){const legacy=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(legacy.customers.length)await upsertPersistentCustomers(legacy.customers);}
     } else {
       mkdirSync(path.dirname(statePath), { recursive: true });
       if (!existsSync(statePath)){
@@ -496,7 +545,7 @@ class StateStore {
     // Keep one normalized in-memory snapshot for short read bursts (typing in
     // search, opening POG, switching filters). Mutations refresh it immediately,
     // so a longer TTL avoids reparsing the full Master Data JSON on every key.
-    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);fresh.customers=await readPersistentCustomers(fresh.customers);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
     if(!this.localState){
       try { this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8"))); }
       catch(error){
@@ -536,6 +585,9 @@ class StateStore {
     const task = this.queue.then(run, run);
     this.queue = task.catch(() => undefined);
     return task;
+  }
+  replaceCustomers(customers) {
+    if(this.remoteState)this.remoteState.customers=(Array.isArray(customers)?customers:[]).map((customer)=>({...customer}));
   }
 }
 
@@ -1033,6 +1085,7 @@ app.post("/api/store", async (req, res, next) => {
         report.phone=normalizePhone(source.phone);report.date=normalizeOrderDate(source.date,Date.now());report.invoiceValue=Math.max(0,Number(String(source.invoiceValue??"").replace(/,/g,""))||0);report.remainingInvoiceValue=Math.max(0,Number(String(source.remainingInvoiceValue??"").replace(/,/g,""))||0);
         if(report.phone.replace(/\D/g,"").length<8)return fail("Số điện thoại khách hàng cần ít nhất 8 chữ số");if(!report.customerName)return fail("Tên khách hàng là bắt buộc");if(!report.employeeName)return fail("Tên nhân viên là bắt buộc");
         const customerFields=customerFieldsFromReport(report),now=Date.now(),existingCustomer=state.customers.find((customer)=>normalizePhone(customer.phone)===report.phone);
+        if(pool)await upsertPersistentCustomers([customerFields]);
         if(existingCustomer)Object.assign(existingCustomer,customerFields,{updatedAt:now});else state.customers.push({id:randomUUID(),...customerFields,createdAt:now,updatedAt:now});
         const id=asText(source.id),existingReport=id?state.dailyReports.find((item)=>item.id===id):null;if(existingReport)Object.assign(existingReport,report,{id:existingReport.id,updatedAt:now});else state.dailyReports.unshift({id:randomUUID(),...report,createdAt:now,updatedAt:now,createdBy:actor.name});
         audit(state,actor,(existingReport?"Cập nhật":"Tạo")+" báo cáo ngày cho khách "+report.customerName);return {ok:true};
@@ -1077,6 +1130,12 @@ app.post("/api/customers/import", requireManager, upload.single("file"), async (
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
   try {
     const parsed=await readCustomerWorkbook(req.file.buffer);
+    if(pool){
+      const persisted=await upsertPersistentCustomers(parsed.records);
+      store.replaceCustomers(persisted.customers);
+      console.info("Imported customer master directly to PostgreSQL:",parsed.sheetName,persisted.created,"new",persisted.updated,"updated");
+      return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created:persisted.created,updated:persisted.updated,imported:parsed.records.length,skipped:parsed.skipped,total:persisted.total,storage:"postgres"});
+    }
     const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}audit(state,actor,"Nhập Master Data khách hàng ("+(parsed.sheetName||"sheet")+"): "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created,updated,imported:parsed.records.length,skipped:parsed.skipped,total:state.customers.length};});
     res.status(result.status||200).json(result);
   }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}
