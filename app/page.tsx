@@ -645,7 +645,21 @@ export default function Home() {
   };
   const loadDailyReports=useCallback(async(month:string)=>{setReportsBusy(true);try{const response=await fetchApi("/api/daily-reports?month="+encodeURIComponent(month),{cache:"no-store"}),payload=await readApiJson<{reports?:DailyReport[];error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tải báo cáo ngày");setDailyReports(payload.reports||[]);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải báo cáo ngày");}finally{setReportsBusy(false);}},[]);
   useEffect(()=>{if(tab==="DAILY_REPORT"&&data)void loadDailyReports(reportMonth);},[tab,data,reportMonth,loadDailyReports]);
-  const saveDailyReport=async(report:Record<string,unknown>)=>{if(await mutate("upsertDailyReport",{report})){await loadDailyReports(reportMonth);}};
+  const saveDailyReport=async(report:Record<string,unknown>)=>{
+    setReportsBusy(true);
+    try {
+      const response=await fetch("/api/store",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"upsertDailyReport",report})});
+      const result=await readApiJson<{error?:string;report?:DailyReport;customer?:CustomerMaster}>(response);
+      if(response.status===401){setData(null);setAuthMode(result.error?"login":"login");throw new Error("Phiên đăng nhập đã hết hạn");}
+      if(!response.ok||!result.report)throw new Error(result.error||"Không thể lưu báo cáo ngày");
+      const savedReport=result.report;
+      setDailyReports((current)=>[...current.filter((item)=>item.id!==savedReport.id),savedReport].filter((item)=>String(item.date||"").startsWith(reportMonth)).sort((left,right)=>String(right.date).localeCompare(String(left.date))||String(right.createdAt||"").localeCompare(String(left.createdAt||""))));
+      if(result.customer)setData((current)=>current?{...current,customers:[result.customer!,...(current.customers||[]).filter((item)=>item.id!==result.customer!.id&&item.phone!==result.customer!.phone)]}:current);
+      setToast("Đã lưu báo cáo tức thời");
+      return true;
+    } catch(cause) { setToast(cause instanceof Error?cause.message:"Không thể lưu báo cáo ngày");return false; }
+    finally { setReportsBusy(false); }
+  };
   const exportDailyReports=(month:string)=>{const selected=/^\d{4}-\d{2}$/.test(month)?month:reportMonth,link=document.createElement("a");link.href="/api/daily-reports/export.xlsx?month="+encodeURIComponent(selected);link.download="Bao_cao_ngay_"+selected+".xlsx";document.body.appendChild(link);link.click();link.remove();};
   const exportCustomerMaster=()=>{const link=document.createElement("a");link.href="/api/customers/export.xlsx";link.download="Master_Khach_Hang.xlsx";document.body.appendChild(link);link.click();link.remove();};
   const loadPurchaseHistory=useCallback(async(month:string)=>{setPurchaseBusy(true);try{const response=await fetchApi("/api/purchase-history?month="+encodeURIComponent(month),{cache:"no-store"}),payload=await readApiJson<PurchaseHistorySummary&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tải lịch sử mua hàng");setPurchaseHistory(payload);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải lịch sử mua hàng");}finally{setPurchaseBusy(false);}},[]);
