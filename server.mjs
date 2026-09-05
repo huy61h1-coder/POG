@@ -116,7 +116,7 @@ async function readCustomerWorkbook(source) {
 }
 const customerStorageFields=["name","status","vatExport","memberCard","group","companyName","email","taxId","vatAddress","deliveryAddress"];
 const customerStorageColumns=["name","status","vat_export","member_card","group_name","company_name","email","tax_id","vat_address","delivery_address"];
-let customerStorageCache=null,customerStorageCacheAt=0;
+let customerStorageCache=null,customerStorageCacheAt=0,customerStorageReady=false;
 function invalidateCustomerStorageCache(){customerStorageCache=null;customerStorageCacheAt=0;}
 function normalizedCustomerRecord(source,now=Date.now()) {
   const fields=customerFieldsFromReport(source||{});
@@ -131,14 +131,14 @@ function customerFromStorageRow(row) {
   return {id:asText(row.id)||randomUUID(),phone:normalizePhone(row.phone),name:asText(row.name),status:asText(row.status),vatExport:asText(row.vat_export),memberCard:asText(row.member_card),group:asText(row.group_name),companyName:asText(row.company_name),email:asText(row.email),taxId:asText(row.tax_id),vatAddress:asText(row.vat_address),deliveryAddress:asText(row.delivery_address),createdAt:asInt(row.created_at,Date.now()),updatedAt:asInt(row.updated_at,Date.now())};
 }
 async function readPersistentCustomers(fallback=[]) {
-  if(!pool)return fallback;
+  if(!pool||!customerStorageReady)return fallback;
   if(customerStorageCache&&Date.now()-customerStorageCacheAt<30_000)return customerStorageCache.map((item)=>({...item}));
   const result=await pool.query("SELECT id,phone,name,status,vat_export,member_card,group_name,company_name,email,tax_id,vat_address,delivery_address,created_at,updated_at FROM fulfillment_customers ORDER BY updated_at DESC, phone ASC");
   customerStorageCache=result.rows.map(customerFromStorageRow);customerStorageCacheAt=Date.now();
   return customerStorageCache.map((item)=>({...item}));
 }
 async function upsertPersistentCustomers(sources) {
-  if(!pool)throw new Error("Kho lưu trữ khách hàng PostgreSQL chưa được cấu hình.");
+  if(!pool||!customerStorageReady)throw new Error("Kho lưu trữ khách hàng PostgreSQL chưa sẵn sàng.");
   const byPhone=new Map(),now=Date.now();
   for(const source of Array.isArray(sources)?sources:[]){
     const record=normalizedCustomerRecord(source,now);if(!record)continue;
@@ -514,9 +514,15 @@ class StateStore {
     if (pool) {
       await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_state (id BOOLEAN PRIMARY KEY DEFAULT TRUE, state JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
       await pool.query("INSERT INTO fulfillment_state (id,state) VALUES (TRUE,$1::jsonb) ON CONFLICT (id) DO NOTHING", [JSON.stringify(initialState())]);
-      await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_customers (phone TEXT PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', vat_export TEXT NOT NULL DEFAULT '', member_card TEXT NOT NULL DEFAULT '', group_name TEXT NOT NULL DEFAULT '', company_name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', tax_id TEXT NOT NULL DEFAULT '', vat_address TEXT NOT NULL DEFAULT '', delivery_address TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)");
-      const stored=await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_customers"),existingCount=Number(stored.rows[0]?.count)||0;
-      if(existingCount===0){const legacy=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(legacy.customers.length)await upsertPersistentCustomers(legacy.customers);}
+      try {
+        await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_customers (phone TEXT PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', vat_export TEXT NOT NULL DEFAULT '', member_card TEXT NOT NULL DEFAULT '', group_name TEXT NOT NULL DEFAULT '', company_name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', tax_id TEXT NOT NULL DEFAULT '', vat_address TEXT NOT NULL DEFAULT '', delivery_address TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)");
+        customerStorageReady=true;
+        const stored=await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_customers"),existingCount=Number(stored.rows[0]?.count)||0;
+        if(existingCount===0){const legacy=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(legacy.customers.length)await upsertPersistentCustomers(legacy.customers);}
+      } catch(error) {
+        customerStorageReady=false;
+        console.warn("Customer master table is unavailable; using durable fulfillment_state fallback:",error instanceof Error?error.message:error);
+      }
     } else {
       mkdirSync(path.dirname(statePath), { recursive: true });
       if (!existsSync(statePath)){
@@ -545,7 +551,7 @@ class StateStore {
     // Keep one normalized in-memory snapshot for short read bursts (typing in
     // search, opening POG, switching filters). Mutations refresh it immediately,
     // so a longer TTL avoids reparsing the full Master Data JSON on every key.
-    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);fresh.customers=await readPersistentCustomers(fresh.customers);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
     if(!this.localState){
       try { this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8"))); }
       catch(error){
@@ -609,7 +615,7 @@ app.use("/api",(req,res,next)=>{
   if(origin){try{if(new URL(origin).host!==req.get("host"))return res.status(403).json({error:"Yêu cầu không cùng nguồn"});}catch{return res.status(403).json({error:"Nguồn yêu cầu không hợp lệ"});}}
   next();
 });
-app.get("/healthz", (_req,res) => res.json({ ok:true, storage:pool?"postgres":"local-json", customerStorage:pool?"postgres-table":"state-json" }));
+app.get("/healthz", (_req,res) => res.json({ ok:true, storage:pool?"postgres":"local-json" }));
 
 const guestActor={userId:"guest",username:"guest",email:"guest",name:"Khách xem",role:"STAFF",active:true};
 function actorFrom(req, state) {
@@ -1085,7 +1091,7 @@ app.post("/api/store", async (req, res, next) => {
         report.phone=normalizePhone(source.phone);report.date=normalizeOrderDate(source.date,Date.now());report.invoiceValue=Math.max(0,Number(String(source.invoiceValue??"").replace(/,/g,""))||0);report.remainingInvoiceValue=Math.max(0,Number(String(source.remainingInvoiceValue??"").replace(/,/g,""))||0);
         if(report.phone.replace(/\D/g,"").length<8)return fail("Số điện thoại khách hàng cần ít nhất 8 chữ số");if(!report.customerName)return fail("Tên khách hàng là bắt buộc");if(!report.employeeName)return fail("Tên nhân viên là bắt buộc");
         const customerFields=customerFieldsFromReport(report),now=Date.now(),existingCustomer=state.customers.find((customer)=>normalizePhone(customer.phone)===report.phone);
-        if(pool)await upsertPersistentCustomers([customerFields]);
+        if(pool&&customerStorageReady)await upsertPersistentCustomers([customerFields]);
         if(existingCustomer)Object.assign(existingCustomer,customerFields,{updatedAt:now});else state.customers.push({id:randomUUID(),...customerFields,createdAt:now,updatedAt:now});
         const id=asText(source.id),existingReport=id?state.dailyReports.find((item)=>item.id===id):null;if(existingReport)Object.assign(existingReport,report,{id:existingReport.id,updatedAt:now});else state.dailyReports.unshift({id:randomUUID(),...report,createdAt:now,updatedAt:now,createdBy:actor.name});
         audit(state,actor,(existingReport?"Cập nhật":"Tạo")+" báo cáo ngày cho khách "+report.customerName);return {ok:true};
@@ -1130,7 +1136,7 @@ app.post("/api/customers/import", requireManager, upload.single("file"), async (
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
   try {
     const parsed=await readCustomerWorkbook(req.file.buffer);
-    if(pool){
+    if(pool&&customerStorageReady){
       const persisted=await upsertPersistentCustomers(parsed.records);
       store.replaceCustomers(persisted.customers);
       console.info("Imported customer master directly to PostgreSQL:",parsed.sheetName,persisted.created,"new",persisted.updated,"updated");
