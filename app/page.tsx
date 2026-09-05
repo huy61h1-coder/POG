@@ -93,6 +93,17 @@ const isLinkedPogPosition = (position:PogPosition) => position.linked !== false 
 const canManage = (role?:Role) => { const normalized=String(role||"").toUpperCase(); return normalized === "ADMIN" || normalized === "MANAGER"; };
 const POG_ANALYSIS_VERSION=14;
 const STORE_SNAPSHOT_KEY="fulfillment-store-snapshot-v1";
+// A proxy can briefly return plain text or HTML (for example 502) while the
+// server is restarting. Convert that into an operator-friendly error instead
+// of leaking a JSON parser exception into the interface.
+async function readApiJson<T>(response:Response):Promise<T> {
+  const body=await response.text();
+  try { return JSON.parse(body||"{}") as T; }
+  catch {
+    if(response.status>=500)throw new Error(`Máy chủ tạm thời không phản hồi (${response.status} ${response.statusText||"Server Error"}). Vui lòng thử lại sau vài giây.`);
+    throw new Error(`Máy chủ trả về dữ liệu không hợp lệ${response.status?` (${response.status})`:""}.`);
+  }
+}
 function readStoreSnapshot():{data:StoreData;cachedAt:number}|null {
   if(typeof window==="undefined")return null;
   try {
@@ -446,7 +457,7 @@ export default function Home() {
     if (!quiet) setBusy(true);
     try {
       const response = await fetch("/api/store?includeProducts=0", { cache:"no-store" });
-      const payload = await response.json() as StoreData & {error?:string;setupRequired?:boolean};
+      const payload = await readApiJson<StoreData & {error?:string;setupRequired?:boolean}>(response);
       if(response.status===401){setData(null);window.sessionStorage.removeItem(STORE_SNAPSHOT_KEY);setAuthMode(payload.setupRequired?"setup":"login");setError("");return;}
       if (!response.ok) throw new Error(payload.error || "Không thể tải dữ liệu");
       const syncedAt=Date.now();setData(payload);setAuthMode(null);setError("");setLastSyncedAt(syncedAt);try{window.sessionStorage.setItem(STORE_SNAPSHOT_KEY,JSON.stringify({cachedAt:syncedAt,data:payload}));}catch{/* Storage can be disabled or full; live data still works. */}
@@ -485,7 +496,7 @@ export default function Home() {
         if(normalizedProductQuery)params.set("q",normalizedProductQuery);if(productSort)params.set("sort",productSort);
         const endpoint=(productSource==="stock"?"/api/stock?":"/api/products?")+params,cacheKey=endpoint;
         const cached=searchCacheRef.current.get(cacheKey);if(cached){productViewCacheRef.current.set(requestKey,cached);if(normalizedProductQuery)searchMatchesCacheRef.current=cached.products.slice(0,8).map(withPogLocation);setProductResult({...cached,products:cached.products.map(withPogLocation)});setProductResultKey(requestKey);setProductsBusy(false);return;}
-        const response=await fetch(endpoint,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage&{error?:string};
+        const response=await fetch(endpoint,{cache:"no-store",signal:controller.signal}),payload=await readApiJson<ProductPage&{error?:string}>(response);
         if(!response.ok)throw new Error(payload.error||"Không thể tải danh sách sản phẩm");
         if(searchCacheRef.current.size>80)searchCacheRef.current.delete(searchCacheRef.current.keys().next().value as string);searchCacheRef.current.set(cacheKey,payload);
         if(productViewCacheRef.current.size>100)productViewCacheRef.current.delete(productViewCacheRef.current.keys().next().value as string);productViewCacheRef.current.set(requestKey,payload);
@@ -503,7 +514,7 @@ export default function Home() {
     const cached=pogSearchCacheRef.current.get(requestKey);if(cached){setPogProducts(cached.products);setPogTotal(cached.total);setPogResultKey(requestKey);return;}
     const controller=new AbortController(),timer=window.setTimeout(async()=>{
       const params=new URLSearchParams({pageSize:"200",pogId:activePogFile?.id||"__no_pog_position__"});if(pogSearch.trim())params.set("q",pogSearch.trim());
-      try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await response.json() as ProductPage;if(response.ok){const products=payload.products.map(withPogLocation);if(pogSearchCacheRef.current.size>80)pogSearchCacheRef.current.delete(pogSearchCacheRef.current.keys().next().value as string);pogSearchCacheRef.current.set(requestKey,{products,total:payload.total});setPogProducts(products);setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
+      try{const response=await fetch("/api/products?"+params,{cache:"no-store",signal:controller.signal}),payload=await readApiJson<ProductPage>(response);if(response.ok){const products=payload.products.map(withPogLocation);if(pogSearchCacheRef.current.size>80)pogSearchCacheRef.current.delete(pogSearchCacheRef.current.keys().next().value as string);pogSearchCacheRef.current.set(requestKey,{products,total:payload.total});setPogProducts(products);setPogTotal(payload.total);setPogResultKey(requestKey);}}catch(cause){void cause}
     },pogSearch.trim()?180:0);
     return()=>{window.clearTimeout(timer);controller.abort();};
   },[actorUserId,pogLine,pogSide,pogSearch,productRefresh,activePogUpdated,activePogFile?.id,withPogLocation]);
@@ -512,7 +523,7 @@ export default function Home() {
     let stopped=false,timer=0,failures=0;
     const poll=async()=>{
       try{
-        const response=await fetch("/api/master-data/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await response.json() as MasterImportJob&{error?:string};
+        const response=await fetch("/api/master-data/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await readApiJson<MasterImportJob&{error?:string}>(response);
         if(response.status===401){setData(null);setAuthMode("login");return;}
         if(!response.ok){const cause=new Error(payload.error||"Không thể theo dõi tiến độ nhập dữ liệu") as Error&{terminal?:boolean};cause.terminal=[403,404].includes(response.status);throw cause;}
         failures=0;
@@ -527,14 +538,14 @@ export default function Home() {
   useEffect(()=>{
     const jobId=stockImportJob?.jobId;if(!actorUserId||!jobId||stockImportJob.status==="uploading"||["completed","failed"].includes(stockImportJob.status))return;
     let stopped=false,timer=0;
-    const poll=async()=>{try{const response=await fetch("/api/stock/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await response.json() as StockImportJob&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể theo dõi file Stock");if(stopped)return;setStockImportJob(payload);if(payload.status==="completed"){clearProductCaches();setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã cập nhật tồn kho từ "+(payload.result?.imported||0)+" SKU");return;}if(payload.status==="failed"){setToast(payload.error||"Không thể nhập file Stock");return;}timer=window.setTimeout(()=>void poll(),900);}catch(cause){if(!stopped){setStockImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:cause instanceof Error?cause.message:""}:current);timer=window.setTimeout(()=>void poll(),3000);}}};void poll();return()=>{stopped=true;window.clearTimeout(timer);};
+    const poll=async()=>{try{const response=await fetch("/api/stock/import/"+encodeURIComponent(jobId),{cache:"no-store"}),payload=await readApiJson<StockImportJob&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể theo dõi file Stock");if(stopped)return;setStockImportJob(payload);if(payload.status==="completed"){clearProductCaches();setProductPage(1);setProductRefresh((value)=>value+1);void loadData(true);setToast("Đã cập nhật tồn kho từ "+(payload.result?.imported||0)+" SKU");return;}if(payload.status==="failed"){setToast(payload.error||"Không thể nhập file Stock");return;}timer=window.setTimeout(()=>void poll(),900);}catch(cause){if(!stopped){setStockImportJob((current)=>current?{...current,phase:"Mất kết nối tạm thời · đang thử lại",error:cause instanceof Error?cause.message:""}:current);timer=window.setTimeout(()=>void poll(),3000);}}};void poll();return()=>{stopped=true;window.clearTimeout(timer);};
   },[actorUserId,clearProductCaches,stockImportJob?.jobId,stockImportJob?.status,loadData]);
 
   const mutate = async (action:string, payload:Record<string,unknown>={}) => {
     setBusy(true);
     try {
       const response = await fetch("/api/store",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,...payload})});
-      const result = await response.json() as {error?:string;setupRequired?:boolean};
+      const result = await readApiJson<{error?:string;setupRequired?:boolean}>(response);
       if(response.status===401){setData(null);setAuthMode(result.setupRequired?"setup":"login");throw new Error("Phiên đăng nhập đã hết hạn");}
       if (!response.ok) throw new Error(result.error || "Thao tác thất bại");
       await loadData(true);clearProductCaches();setProductRefresh((value)=>value+1);setToast("Đã cập nhật thành công");
@@ -546,7 +557,7 @@ export default function Home() {
   const uploadCloudinaryImage = async (file:File,sku:string) => {
     const form=new FormData();form.set("file",file);form.set("sku",sku);
     const response=await fetch("/api/cloudinary/upload",{method:"POST",body:form});
-    const result=await response.json() as {url?:string;error?:string};
+    const result=await readApiJson<{url?:string;error?:string}>(response);
     if(!response.ok||!result.url)throw new Error(result.error||"Không thể tải ảnh lên Cloudinary");
     return result.url;
   };
@@ -556,7 +567,7 @@ export default function Home() {
     setBusy(true);setError("");
     try {
       const response=await fetch(authMode==="setup"?"/api/auth/setup":"/api/auth/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(credentials)});
-      const result=await response.json() as {error?:string};
+      const result=await readApiJson<{error?:string}>(response);
       if(!response.ok)throw new Error(result.error||"Không thể đăng nhập");
       setLoginOpen(false);setAuthMode(null);
       await loadData(true);
@@ -598,12 +609,12 @@ export default function Home() {
     const selected=/^\d{4}-\d{2}$/.test(month)?month:orderDateKey(Date.now()).slice(0,7),link=document.createElement("a");
     link.href="/api/orders/export.xlsx?month="+encodeURIComponent(selected);link.download="Don_soan_khach_hang_"+selected+".xlsx";document.body.appendChild(link);link.click();link.remove();
   };
-  const loadDailyReports=useCallback(async(month:string)=>{setReportsBusy(true);try{const response=await fetch("/api/daily-reports?month="+encodeURIComponent(month),{cache:"no-store"}),payload=await response.json() as {reports?:DailyReport[];error?:string};if(!response.ok)throw new Error(payload.error||"Không thể tải báo cáo ngày");setDailyReports(payload.reports||[]);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải báo cáo ngày");}finally{setReportsBusy(false);}},[]);
+  const loadDailyReports=useCallback(async(month:string)=>{setReportsBusy(true);try{const response=await fetch("/api/daily-reports?month="+encodeURIComponent(month),{cache:"no-store"}),payload=await readApiJson<{reports?:DailyReport[];error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tải báo cáo ngày");setDailyReports(payload.reports||[]);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tải báo cáo ngày");}finally{setReportsBusy(false);}},[]);
   useEffect(()=>{if(tab==="DAILY_REPORT"&&data)void loadDailyReports(reportMonth);},[tab,data,reportMonth,loadDailyReports]);
   const saveDailyReport=async(report:Omit<DailyReport,"id"|"createdAt"|"updatedAt"|"createdBy">)=>{if(await mutate("upsertDailyReport",{report})){await loadDailyReports(reportMonth);}};
   const exportDailyReports=(month:string)=>{const selected=/^\d{4}-\d{2}$/.test(month)?month:reportMonth,link=document.createElement("a");link.href="/api/daily-reports/export.xlsx?month="+encodeURIComponent(selected);link.download="Bao_cao_ngay_"+selected+".xlsx";document.body.appendChild(link);link.click();link.remove();};
   const exportCustomerMaster=()=>{const link=document.createElement("a");link.href="/api/customers/export.xlsx";link.download="Master_Khach_Hang.xlsx";document.body.appendChild(link);link.click();link.remove();};
-  const importCustomerMaster=async(file?:File)=>{if(!file)return;setBusy(true);try{const form=new FormData();form.set("file",file);const response=await fetch("/api/customers/import",{method:"POST",body:form}),payload=await response.json() as {error?:string;created?:number;updated?:number;imported?:number;skipped?:number;sheetName?:string};if(!response.ok)throw new Error(payload.error||"Không thể nhập Master Data khách hàng");await loadData(true);setToast(`Đã nhập Master khách hàng${payload.sheetName?` · sheet ${payload.sheetName}`:""} · ${payload.imported||0} dòng · ${payload.created||0} mới · ${payload.updated||0} cập nhật${payload.skipped?` · ${payload.skipped} bỏ qua`:""}`);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể nhập Master Data khách hàng");}finally{setBusy(false);if(customerExcelRef.current)customerExcelRef.current.value="";}};
+  const importCustomerMaster=async(file?:File)=>{if(!file)return;setBusy(true);try{const form=new FormData();form.set("file",file);const response=await fetch("/api/customers/import",{method:"POST",body:form}),payload=await readApiJson<{error?:string;created?:number;updated?:number;imported?:number;skipped?:number;sheetName?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể nhập Master Data khách hàng");await loadData(true);setToast(`Đã nhập Master khách hàng${payload.sheetName?` · sheet ${payload.sheetName}`:""} · ${payload.imported||0} dòng · ${payload.created||0} mới · ${payload.updated||0} cập nhật${payload.skipped?` · ${payload.skipped} bỏ qua`:""}`);}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể nhập Master Data khách hàng");}finally{setBusy(false);if(customerExcelRef.current)customerExcelRef.current.value="";}};
   const importExcel = async (file?:File) => {
     if(!file||importActive)return;
     const jobId=crypto.randomUUID(),form=new FormData();form.set("file",file);
@@ -615,7 +626,7 @@ export default function Home() {
         xhr.upload.onprogress=(event)=>{if(event.lengthComputable)setImportJob((current)=>current?{...current,percent:Math.min(10,Math.round(event.loaded/event.total*10))}:current);};
         xhr.onerror=()=>reject(new Error("Mất kết nối khi tải file Excel"));
         xhr.ontimeout=()=>reject(new Error("Tải file quá lâu · hệ thống sẽ tự kiểm tra lại trạng thái"));xhr.onabort=()=>reject(new Error("Đã dừng tải file Excel"));
-        xhr.onload=()=>{let payload:MasterImportJob&{error?:string};try{payload=JSON.parse(xhr.responseText);}catch{reject(new Error("Máy chủ trả về dữ liệu không hợp lệ"));return;}if(xhr.status!==202){const cause=new Error(payload.error||"Không thể nhập Master Data") as Error&{terminal?:boolean};cause.terminal=xhr.status>=400&&xhr.status<500;reject(cause);return;}resolve(payload);};
+        xhr.onload=()=>{let payload:MasterImportJob&{error?:string};try{payload=JSON.parse(xhr.responseText||"{}");}catch{reject(new Error(xhr.status>=500?`Máy chủ tạm thời không phản hồi (${xhr.status} ${xhr.statusText||"Server Error"}). Vui lòng thử lại sau vài giây.`:"Máy chủ trả về dữ liệu không hợp lệ"));return;}if(xhr.status!==202){const cause=new Error(payload.error||"Không thể nhập Master Data") as Error&{terminal?:boolean};cause.terminal=xhr.status>=400&&xhr.status<500;reject(cause);return;}resolve(payload);};
         xhr.send(form);
       });
       setImportJob(result);
@@ -625,12 +636,12 @@ export default function Home() {
   const importStockExcel=async(file?:File)=>{
     if(!file||stockImportJob&&["uploading","queued","processing"].includes(stockImportJob.status))return;
     setStockImportJob({jobId:"",status:"uploading",phase:"Đang tải file Stock",percent:5,processedRows:0,totalRows:0,fileName:file.name,result:null,error:""});
-    try{const form=new FormData();form.set("file",file);const response=await fetch("/api/stock/import",{method:"POST",body:form}),payload=await response.json() as StockImportJob&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể nhập file Stock");setStockImportJob(payload);}catch(cause){setStockImportJob(null);setToast(cause instanceof Error?cause.message:"Không thể nhập file Stock");}finally{if(stockExcelRef.current)stockExcelRef.current.value="";}
+    try{const form=new FormData();form.set("file",file);const response=await fetch("/api/stock/import",{method:"POST",body:form}),payload=await readApiJson<StockImportJob&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể nhập file Stock");setStockImportJob(payload);}catch(cause){setStockImportJob(null);setToast(cause instanceof Error?cause.message:"Không thể nhập file Stock");}finally{if(stockExcelRef.current)stockExcelRef.current.value="";}
   };
   const addManualCheck=(kind:ManualCheckKind)=>setManualCheckModal(kind);
   const searchManualProducts=async(search:string):Promise<Product[]>=>{
     const params=new URLSearchParams({page:"1",pageSize:"50"});if(search.trim())params.set("q",search.trim());
-    const response=await fetch("/api/products?"+params,{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};
+    const response=await fetch("/api/products?"+params,{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);
     if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");
     const lossById=new Map((manualCheckLossProducts||[]).map((item)=>[item.id,item])),dateById=new Map((data.manualChecks.expiry||[]).map((item)=>[item.id,item]));
     return payload.products.map((product)=>{const lossCheck=lossById.get(product.id),dateCheck=dateById.get(product.id);return withPogLocation({...product,manualStock:lossCheck?.manualStock??(lossCheck?.stockKnown?lossCheck.stock:undefined),manualLoss:lossCheck?.manualLoss??(lossCheck?.loss||undefined),inboundDate:dateCheck?.inboundDate,withdrawDate:dateCheck?.withdrawDate||dateCheck?.expDate,expDate:dateCheck?.withdrawDate||dateCheck?.expDate||product.expDate});});
@@ -641,10 +652,10 @@ export default function Home() {
 
   const openProductOnMap = (product:Product,keepQuery=false) => { const location=pogLocationFor(product);if(!location){setToast("SKU này chưa được gán vị trí kệ từ POG.");return;}setPogModal({line:location.line,side:location.side,selectedId:product.id});setPogSearch(product.sku);if(!keepQuery)setQuery("");setProductPage(1); };
   const quickAdd = async (product:Product,keepQuery=false) => { if(product.stock===0){setToast("Sản phẩm đang hết hàng");return;}if(await mutate("addPick",{productId:product.id,quantity:1})){if(!keepQuery)setQuery("");setProductPage(1);} };
-  const handleBarcode = async (rawValue:string,keepQuery=false) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact,keepQuery);else if(payload.products[0])openProductOnMap(payload.products[0],keepQuery);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
+  const handleBarcode = async (rawValue:string,keepQuery=false) => { const value=rawValue.trim(),needle=normalize(value);if(!value)return;try{const response=await fetch("/api/products?"+new URLSearchParams({q:value,page:"1",pageSize:"8"}),{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);if(!response.ok)throw new Error(payload.error||"Không thể tìm sản phẩm");const exact=payload.products.find((p)=>normalize(p.sku)===needle||normalize(p.barcode)===needle||normalize(p.supplierBarcode)===needle);if(exact)await quickAdd(exact,keepQuery);else if(payload.products[0])openProductOnMap(payload.products[0],keepQuery);else setToast("Không tìm thấy SKU hoặc barcode");}catch(cause){setToast(cause instanceof Error?cause.message:"Không thể tìm sản phẩm");} };
   const handleSearchEnter = async () => { await handleBarcode(query); };
   const loadPogSourceFiles=async(record:PogFile)=>{const sources=record.sources?.length?record.sources:[{fileName:record.fileName,mimeType:record.mimeType}],files:File[]=[];for(let index=0;index<sources.length;index++){const response=await fetch(`/api/pog?id=${encodeURIComponent(record.id)}&source=${index}`,{cache:"no-store"});if(!response.ok)throw new Error("Không thể đọc file POG "+(index+1));const blob=await response.blob(),source=sources[index];files.push(new File([blob],source.fileName,{type:source.mimeType}));}return files;};
-  const savePogAnalysis=async(file:File,line:string,side:"A"|"B",analysis:PogAnalysis|null,mode:"replace"|"append"|"reanalyze"="replace")=>{const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);form.set("mode",mode);if(analysis){form.set("shelfImage",analysis.image,`pog-${line}${side}-shelf.webp`);form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));form.set("analysisVersion",String(POG_ANALYSIS_VERSION));}const response=await fetch("/api/pog",{method:"POST",body:form}),result=await response.json() as {error?:string;mappedCount?:number;analyzedPages?:number;fileCount?:number};if(!response.ok)throw new Error(result.error||"Không thể tải POG");return result;};
+  const savePogAnalysis=async(file:File,line:string,side:"A"|"B",analysis:PogAnalysis|null,mode:"replace"|"append"|"reanalyze"="replace")=>{const form=new FormData();form.set("file",file);form.set("line",line);form.set("side",side);form.set("mode",mode);if(analysis){form.set("shelfImage",analysis.image,`pog-${line}${side}-shelf.webp`);form.set("positions",JSON.stringify(analysis.positions));form.set("shelfWidth",String(analysis.width));form.set("shelfHeight",String(analysis.height));form.set("sourcePages",analysis.sourcePages.join(","));form.set("analysisVersion",String(POG_ANALYSIS_VERSION));}const response=await fetch("/api/pog",{method:"POST",body:form}),result=await readApiJson<{error?:string;mappedCount?:number;analyzedPages?:number;fileCount?:number}>(response);if(!response.ok)throw new Error(result.error||"Không thể tải POG");return result;};
   const uploadPogFor = async (file:File|undefined,line:string,side:"A"|"B",silent=false,append=false,analysisMode:PogAnalysisMode="auto") => {
     if(!file)return false;if(!silent){setBusy(true);setPogUploadBusy(true);}
     try {const existing=data?.pogFiles.find((record)=>record.id===line+"_"+side),sourceFiles=append&&existing?[...await loadPogSourceFiles(existing),file]:[file],analysis=await analyzePogFiles(sourceFiles,analysisMode),result=await savePogAnalysis(file,line,side,analysis,append?"append":"replace");if(!silent){await loadData(true);const modeLabel=analysisMode==="page1"?"chỉ hiển thị Trang 1":analysisMode==="page2"?"chỉ hiển thị Trang 2":"tự động ghép tất cả trang";setToast(analysis?`Đã ${analysisMode==="auto"?"ghép ảnh":"cập nhật ảnh"} ${result.fileCount||sourceFiles.length} file (${modeLabel}) · đã đọc ${result.mappedCount||0} vị trí từ danh sách sản phẩm`:`POG ${line}${side} chưa nhận diện được vùng kệ; hãy kiểm tra trang đã chọn và bảng STT/SKU.`);}return Boolean(analysis);
@@ -677,13 +688,13 @@ export default function Home() {
     setSuggestBusy(true);setSuggestError("");
     try {
       const response=await fetch("/api/ai/suggest",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({query:value})});
-      const payload=await response.json() as AiSuggestionResult&{error?:string};
+      const payload=await readApiJson<AiSuggestionResult&{error?:string}>(response);
       if(!response.ok)throw new Error(payload.error||"Không thể phân tích lúc này.");
       setSuggestResult(payload);
     } catch(cause){setSuggestError(cause instanceof Error?cause.message:"Không thể phân tích lúc này.");}
     finally{setSuggestBusy(false);}
   };
-  const openSuggested=async(item:AiSuggestion)=>{try{const response=await fetch("/api/products?id="+encodeURIComponent(item.productId),{cache:"no-store"}),payload=await response.json() as ProductPage&{error?:string};if(!response.ok||!payload.products[0])throw new Error(payload.error||"Sản phẩm không còn trong danh sách");openProductOnMap(payload.products[0]);}catch(cause){setToast(cause instanceof Error?cause.message:"Sản phẩm không còn trong danh sách");}};
+  const openSuggested=async(item:AiSuggestion)=>{try{const response=await fetch("/api/products?id="+encodeURIComponent(item.productId),{cache:"no-store"}),payload=await readApiJson<ProductPage&{error?:string}>(response);if(!response.ok||!payload.products[0])throw new Error(payload.error||"Sản phẩm không còn trong danh sách");openProductOnMap(payload.products[0]);}catch(cause){setToast(cause instanceof Error?cause.message:"Sản phẩm không còn trong danh sách");}};
   const addSuggested=async(item:AiSuggestion)=>{if(item.stock===0){setToast("Sản phẩm đang hết hàng");return;}await mutate("addPick",{productId:item.productId,quantity:item.quantity});};
 
   if (!data && authMode) return <AuthScreen mode={authMode} busy={busy} error={error} onSubmit={authenticate}/>;
