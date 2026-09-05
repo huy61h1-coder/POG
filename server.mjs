@@ -131,7 +131,7 @@ async function readCustomerWorkbook(source) {
   return candidates[0];
 }
 async function readPurchaseWorkbook(source,period){
-  const sheets=await readCustomerWorkbookSheets(source),allSheets=Array.isArray(sheets)?sheets:[],monthSheets=allSheets.filter((sheet)=>normalizeText(sheet.sheet).includes("thang"));
+  const sheets=await readCustomerWorkbookSheets(source,{sheetFilter:(name)=>normalizeText(name).includes("thang")}),allSheets=Array.isArray(sheets)?sheets:[],monthSheets=allSheets;
   if(!monthSheets.length)throw new Error("File Excel lịch sử mua hàng cần có sheet có chữ “tháng” (ví dụ: Tháng 09 hoặc Tháng 09-2026).");
   const candidates=[];
   for(const sheet of monthSheets){try{const parsed=parsePurchaseRows(sheet.data,{period});candidates.push({sheetName:asText(sheet.sheet),...parsed});}catch{/* Ignore cover/template sheets inside the selected month worksheets. */}}
@@ -254,7 +254,18 @@ async function upsertPersistentPurchaseHistory(records,sourceName){
   if(!pool||!purchaseStorageReady)throw new Error("Kho lịch sử mua hàng PostgreSQL chưa sẵn sàng.");
   const rows=(Array.isArray(records)?records:[]).map((record)=>{const period=asText(record.period),phone=normalizePhone(record.phone),date=asText(record.date),invoice=asText(record.invoiceNumber),sourceRow=asInt(record.rowNumber,record.sourceRow);return {sourceKey:purchaseRecordKey({...record,period,phone,date,invoiceNumber:invoice,sourceRow}),period,phone,customerName:asText(record.customerName).slice(0,4000),address:asText(record.address).slice(0,4000),date,invoiceNumber:invoice.slice(0,200),invoiceValue:Number(record.invoiceValue)||0,products:asText(record.products).slice(0,4000),sourceName:asText(sourceName).slice(0,300),sourceRow};}).filter((record)=>record.period&&record.phone.length>=8);
   const byKey=new Map(rows.map((record)=>[record.sourceKey,record]));const unique=[...byKey.values()],client=await pool.connect();let created=0,updated=0;
-  try { await client.query("BEGIN"); for(let start=0;start<unique.length;start+=250){const batch=unique.slice(start,start+250),values=[],tuples=batch.map((record,index)=>{const offset=index*12+1;values.push(record.sourceKey,record.period,record.phone,record.customerName,record.address,record.date,record.invoiceNumber,record.invoiceValue,record.products,record.sourceName,record.sourceRow,Date.now());return "("+Array.from({length:12},(_,item)=>"$"+(offset+item)).join(",")+")";});const existing=await client.query("SELECT source_key FROM fulfillment_purchase_history WHERE source_key=ANY($1::text[])",[batch.map((record)=>record.sourceKey)]);const existingKeys=new Set(existing.rows.map((row)=>row.source_key));for(const record of batch){if(existingKeys.has(record.sourceKey))updated++;else created++;}await client.query(`INSERT INTO fulfillment_purchase_history (source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at) VALUES ${tuples.join(",")} ON CONFLICT (source_key) DO UPDATE SET period=EXCLUDED.period,phone=EXCLUDED.phone,customer_name=EXCLUDED.customer_name,address=EXCLUDED.address,purchase_date=EXCLUDED.purchase_date,invoice_number=EXCLUDED.invoice_number,invoice_value=EXCLUDED.invoice_value,products=EXCLUDED.products,source_name=EXCLUDED.source_name,source_row=EXCLUDED.source_row,updated_at=EXCLUDED.updated_at`,values); } await client.query("COMMIT"); } catch(error){await client.query("ROLLBACK").catch(()=>undefined);throw error;} finally {client.release();}
+  try {
+    await client.query("BEGIN");
+    for(let start=0;start<unique.length;start+=1000){
+      const batch=unique.slice(start,start+1000),values=[],tuples=batch.map((record,index)=>{
+        const offset=index*12+1;values.push(record.sourceKey,record.period,record.phone,record.customerName,record.address,record.date,record.invoiceNumber,record.invoiceValue,record.products,record.sourceName,record.sourceRow,Date.now());
+        return "("+Array.from({length:12},(_,item)=>"$"+(offset+item)).join(",")+")";
+      });
+      const result=await client.query(`INSERT INTO fulfillment_purchase_history (source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at) VALUES ${tuples.join(",")} ON CONFLICT (source_key) DO UPDATE SET period=EXCLUDED.period,phone=EXCLUDED.phone,customer_name=EXCLUDED.customer_name,address=EXCLUDED.address,purchase_date=EXCLUDED.purchase_date,invoice_number=EXCLUDED.invoice_number,invoice_value=EXCLUDED.invoice_value,products=EXCLUDED.products,source_name=EXCLUDED.source_name,source_row=EXCLUDED.source_row,updated_at=EXCLUDED.updated_at RETURNING (xmax=0) AS inserted`,values);
+      for(const row of result.rows){if(row.inserted)created++;else updated++;}
+    }
+    await client.query("COMMIT");
+  } catch(error){await client.query("ROLLBACK").catch(()=>undefined);throw error;} finally {client.release();}
   return {created,updated,imported:unique.length};
 }
 function purchaseSummary(records,month){
@@ -630,6 +641,7 @@ class StateStore {
       }
       try {
         await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_purchase_history (source_key TEXT PRIMARY KEY, period TEXT NOT NULL, phone TEXT NOT NULL, customer_name TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '', purchase_date TEXT NOT NULL, invoice_number TEXT NOT NULL DEFAULT '', invoice_value NUMERIC NOT NULL DEFAULT 0, products TEXT NOT NULL DEFAULT '', source_name TEXT NOT NULL DEFAULT '', source_row INTEGER NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL)");
+        await pool.query("CREATE INDEX IF NOT EXISTS fulfillment_purchase_history_period_idx ON fulfillment_purchase_history (period)");
         purchaseStorageReady=true;
       } catch(error) {
         purchaseStorageReady=false;
@@ -1169,7 +1181,11 @@ app.post("/api/purchase-history/import",requireManager,upload.single("file"),asy
     for(const record of records){if(current.has(record.id))updated++;else created++;current.set(record.id,record);}
     const all=[...current.values()].sort((left,right)=>String(right.date).localeCompare(String(left.date)));await writeLocalPurchaseHistory(all);store.replacePurchaseHistory(all);
     return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created,updated,imported:records.length,skipped:parsed.skipped,total:all.length,storage:"local-file"});
-  } catch(error){next(error);}
+  } catch(error){
+    const message=error instanceof Error?error.message:"Không thể nhập lịch sử mua hàng";
+    if(/^(Hãy chọn|File|Sheet|Không tìm thấy dòng|Không tìm thấy sheet)/i.test(message))return res.status(400).json({error:message});
+    next(error);
+  }
 });
 
 app.get("/api/customers",async(req,res,next)=>{
