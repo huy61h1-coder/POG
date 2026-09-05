@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { strToU8, zipSync } from "fflate";
 import { normalizeImageUrl, normalizeMasterProduct } from "./lib/master-data.mjs";
+import { DAILY_REPORT_COLUMNS, parseCustomerRows, customerFieldsFromReport } from "./lib/customer-data.mjs";
+import { readSheet } from "read-excel-file/node";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
@@ -42,7 +44,7 @@ function initialState() {
       { id:"p2",sku:"10763049",barcode:"45497410763049",supplierBarcode:"45497410763049",name:"HC GỐI MOCHI PILLOW BE",division:"12",divisionName:"HOME & LIVING",department:"1201",departmentName:"HOME COORDY",line:"12",lineName:"HOUSEHOLD",side:"B",bay:2,price:185000,stock:45,loss:2,expDate:"2026-06-15",updatedAt:now },
       { id:"p3",sku:"8969583",barcode:"8801260418800",supplierBarcode:"8801260418800",name:"BVS SOONSOOHANMYEON 23CM 18 MIẾNG",division:"10",divisionName:"HEALTH & BEAUTY",department:"1002",departmentName:"FEMININE CARE",line:"16",lineName:"NONFOOD",side:"A",bay:5,price:45000,stock:0,loss:0,expDate:"2027-01-10",updatedAt:now },
     ],
-    accounts: [], sessions: [], roles: [], logs: [], picking: [], orderHistory: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
+    accounts: [], sessions: [], roles: [], logs: [], picking: [], orderHistory: [], customers: [], dailyReports: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
     // Keep the legacy logoSize field as a desktop alias for older clients,
     // while storing independent desktop/mobile sizes for the responsive UI.
     appBrand: { logo:"/aeon-logo.svg", logoSize:220, logoSizeDesktop:220, logoSizeMobile:120, updatedAt:now },
@@ -94,6 +96,8 @@ function ensureStateShape(source) {
   state.logs=Array.isArray(state.logs)?state.logs:[];
   state.picking=Array.isArray(state.picking)?state.picking:[];
   state.orderHistory=Array.isArray(state.orderHistory)?state.orderHistory:[];
+  state.customers=Array.isArray(state.customers)?state.customers.filter((item)=>asText(item?.phone)).map((item)=>({id:asText(item.id)||randomUUID(),phone:normalizePhone(item.phone),name:asText(item.name),status:asText(item.status),vatExport:asText(item.vatExport),memberCard:asText(item.memberCard),group:asText(item.group),email:asText(item.email),taxId:asText(item.taxId),vatAddress:asText(item.vatAddress),deliveryAddress:asText(item.deliveryAddress),createdAt:asInt(item.createdAt,Date.now()),updatedAt:asInt(item.updatedAt,Date.now())})):[];
+  state.dailyReports=Array.isArray(state.dailyReports)?state.dailyReports.filter((item)=>asText(item?.id)).map((item)=>({id:asText(item.id),...Object.fromEntries(DAILY_REPORT_COLUMNS.map(([key])=>[key,asText(item[key])])),invoiceValue:Number(item.invoiceValue)||0,remainingInvoiceValue:Number(item.remainingInvoiceValue)||0,createdAt:asInt(item.createdAt,Date.now()),updatedAt:asInt(item.updatedAt,Date.now()),createdBy:asText(item.createdBy)})):[];
   state.pogFiles=Array.isArray(state.pogFiles)?state.pogFiles:[];
   state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),name:asText(item.name),division:asText(item.division),divisionName:asText(item.divisionName),department:asText(item.department),departmentName:asText(item.departmentName),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   const validCheckDate=(value)=>/^\d{4}-\d{2}-\d{2}$/.test(asText(value))?asText(value):"";
@@ -734,7 +738,7 @@ app.get("/api/store", async (req, res, next) => {
     const historyItem=(item)=>{const current=pickItem(item);return current?{...current,completedAt:asInt(item.completedAt,item.createdAt||Date.now()),completedBy:asText(item.completedBy,item.assignedBy)}:null;};
     const picking=state.picking.filter((item)=>item.userId===actor.userId).map(pickItem).filter(Boolean),assignedPicking=(canManage(actor.role)?state.picking:state.picking.filter((item)=>item.userId===actor.userId||item.deliveryAssigneeId===actor.userId)).map(pickItem).filter(Boolean),orderHistory=state.orderHistory.filter((item)=>canManage(actor.role)||item.userId===actor.userId||item.deliveryAssigneeId===actor.userId).map(historyItem).filter(Boolean).slice(0,500);
     const users=(canManage(actor.role)?state.accounts:state.accounts.filter((account)=>account.id===actor.userId)).map(publicAccount),summary=getProductSummary(state),manual=manualCheckGroups(state);
-    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,assignedPicking,orderHistory,users,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,appBrand:state.appBrand,manualChecks:manual,stockImport:state.stockImport};
+    const data={actor,products:req.query.includeProducts==="1"?state.products.map((product)=>withUploadedStock(product,uploaded)):[],productTotal:summary.stats.total,productStats:summary.stats,alertProducts:summary.alerts,availableLines:summary.lines,logs:state.logs.slice(0,80),picking,assignedPicking,orderHistory,users,customers:state.customers,pogFiles:state.pogFiles,lineConfigs:state.lineConfigs,appBrand:state.appBrand,manualChecks:manual,stockImport:state.stockImport};
     res.status(data.status||200).json(data);
   } catch (error) { next(error); }
 });
@@ -836,6 +840,41 @@ app.get("/api/orders/export.xlsx",async(req,res,next)=>{
     const rows=[headers,...[...groups.values()].sort((a,b)=>a.date.localeCompare(b.date)||a.customerName.localeCompare(b.customerName,"vi")).map((group)=>[group.date,group.invoices.join(", ")||"—",group.customerName,group.phone||"—",group.products.join("\n"),group.totalQuantity,group.statuses.length===1?group.statuses[0]:"Đang xử lý",group.slots.join(", ")||"Chưa chọn",group.pickers.join(", "),group.drivers.join(", "),group.assignedBy.join(", "),group.completedDates.join(", ")])];
     const workbook=createXlsx(rows),filename=`Don_soan_khach_hang_${month}.xlsx`;
     res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
+  } catch(error){next(error);}
+});
+
+app.get("/api/daily-reports",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7);
+    const reports=state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.set("Cache-Control","no-store").json({reports,customers:state.customers,month});
+  } catch(error){next(error);}
+});
+
+app.get("/api/customers",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const query=normalizeText(req.query.q),customers=query?state.customers.filter((customer)=>normalizeText([customer.phone,customer.name,customer.email].join(" ")).includes(query)):state.customers;
+    res.set("Cache-Control","no-store").json({customers:customers.slice(0,5000)});
+  } catch(error){next(error);}
+});
+
+app.get("/api/daily-reports/export.xlsx",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),reports=state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    const headers=["STT",...DAILY_REPORT_COLUMNS.map(([,label])=>label)],rows=[headers,...reports.map((report,index)=>[index+1,...DAILY_REPORT_COLUMNS.map(([key])=>report[key]??"")])];
+    const workbook=createXlsx(rows),filename=`Bao_cao_ngay_${month}.xlsx`;
+    res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
+  } catch(error){next(error);}
+});
+
+app.get("/api/customers/export.xlsx",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const headers=["SĐT","TÊN KHÁCH HÀNG","TÌNH TRẠNG KH","XUẤT VAT","THẺ THÀNH VIÊN","NHÓM KH","Email","MST","ĐỊA CHỈ XUẤT VAT","ĐỊA CHỈ GIAO HÀNG","Ngày cập nhật"],rows=[headers,...state.customers.map((customer)=>[customer.phone,customer.name,customer.status,customer.vatExport,customer.memberCard,customer.group,customer.email,customer.taxId,customer.vatAddress,customer.deliveryAddress,localDateKey(customer.updatedAt)])];
+    const workbook=createXlsx(rows);res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":"attachment; filename=Master_Khach_Hang.xlsx","Cache-Control":"no-store"}).send(Buffer.from(workbook));
   } catch(error){next(error);}
 });
 
@@ -945,6 +984,15 @@ app.post("/api/store", async (req, res, next) => {
         const auditLabel=kind==="checkLoss"?"Check Loss":kind==="checkDate"?"Check Date":kind==="stock"?"kiểm tồn":kind==="loss"?"thất thoát":"hạn dùng";
         audit(state,actor,"Nhập "+auditLabel+" SKU "+product.sku);return {ok:true};
       }
+      if(action==="upsertDailyReport"){
+        const source=body.report||{},report=Object.fromEntries(DAILY_REPORT_COLUMNS.map(([key])=>[key,asText(source[key]).slice(0,2000)]));
+        report.phone=normalizePhone(source.phone);report.date=normalizeOrderDate(source.date,Date.now());report.invoiceValue=Math.max(0,Number(String(source.invoiceValue??"").replace(/,/g,""))||0);report.remainingInvoiceValue=Math.max(0,Number(String(source.remainingInvoiceValue??"").replace(/,/g,""))||0);
+        if(report.phone.replace(/\D/g,"").length<8)return fail("Số điện thoại khách hàng cần ít nhất 8 chữ số");if(!report.customerName)return fail("Tên khách hàng là bắt buộc");if(!report.employeeName)return fail("Tên nhân viên là bắt buộc");
+        const customerFields=customerFieldsFromReport(report),now=Date.now(),existingCustomer=state.customers.find((customer)=>normalizePhone(customer.phone)===report.phone);
+        if(existingCustomer)Object.assign(existingCustomer,customerFields,{updatedAt:now});else state.customers.push({id:randomUUID(),...customerFields,createdAt:now,updatedAt:now});
+        const id=asText(source.id),existingReport=id?state.dailyReports.find((item)=>item.id===id):null;if(existingReport)Object.assign(existingReport,report,{id:existingReport.id,updatedAt:now});else state.dailyReports.unshift({id:randomUUID(),...report,createdAt:now,updatedAt:now,createdBy:actor.name});
+        audit(state,actor,(existingReport?"Cập nhật":"Tạo")+" báo cáo ngày cho khách "+report.customerName);return {ok:true};
+      }
       if(action==="addPick"){const productId=asText(body.productId),quantity=Math.max(1,Math.min(99,asInt(body.quantity,1))),product=state.products.find((p)=>p.id===productId),record=product&&stockIndex(state.stockRecords).get(normalizeText(product.sku));if(!product)return fail("Không tìm thấy sản phẩm",404);if(!record)return fail("Chưa có dữ liệu tồn kho từ file Stock cho sản phẩm này",409);if(record.stock<=0)return fail("Sản phẩm đang hết hàng",409);const found=state.picking.find((item)=>item.userId===actor.userId&&item.productId===productId);if(found){found.quantity=Math.min(99,found.quantity+quantity);found.picked=false;found.pickedQuantity=0;}else {const now=Date.now();state.picking.push({id:randomUUID(),userId:actor.userId,productId,quantity,picked:false,pickedQuantity:0,orderDate:localDateKey(now),createdAt:now});}audit(state,actor,"Thêm sản phẩm vào đơn soạn");return {ok:true};}
       if(action==="assignPick"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const productId=asText(body.productId),requestedAssigneeId=asText(body.assigneeId),assigneeId=requestedAssigneeId,deliveryAssigneeId=asText(body.deliveryAssigneeId),quantity=Math.max(1,Math.min(999,asInt(body.quantity,1))),customerName=asText(body.customerName).slice(0,100),customerPhone=normalizePhone(body.customerPhone),invoiceNumber=asText(body.invoiceNumber).slice(0,80),note=asText(body.note).slice(0,500),orderDate=normalizeOrderDate(body.orderDate,Date.now()),deliveryTimeSlot=asText(body.deliveryTimeSlot),validSlots=["08:00 - 10:00","10:00 - 12:00","12:00 - 14:00","14:00 - 16:00","16:00 - 18:00","18:00 - 20:00"],product=state.products.find((p)=>p.id===productId),assignee=assigneeId?state.accounts.find((account)=>account.id===assigneeId&&account.active!==false):null,deliveryAssignee=deliveryAssigneeId?state.accounts.find((account)=>account.id===deliveryAssigneeId&&account.active!==false):null,record=product&&stockIndex(state.stockRecords).get(normalizeText(product.sku));if(!product)return fail("Không tìm thấy sản phẩm",404);if(assigneeId&&!assignee)return fail("Không tìm thấy nhân viên soạn hàng",404);if(deliveryAssigneeId&&(!deliveryAssignee||!["DELIVERY","BOTH"].includes(deliveryAssignee.workType||"BOTH")))return fail("Nhân viên giao hàng không hợp lệ",404);if(deliveryTimeSlot&&!validSlots.includes(deliveryTimeSlot))return fail("Khung giờ giao hàng không hợp lệ");if(!record||record.stock<=0)return fail("Sản phẩm không có tồn kho từ file Stock",409);if(quantity>record.stock)return fail("Số lượng giao vượt tồn kho hiện có ("+record.stock+")",400);if(!customerName)return fail("Tên khách hàng là bắt buộc");if(customerPhone.replace(/\D/g,"").length<8)return fail("Số điện thoại khách hàng cần ít nhất 8 chữ số");const now=Date.now();state.picking.push({id:randomUUID(),userId:assigneeId||"",productId,quantity,picked:false,workflowStatus:assigneeId?"picking":"unassigned",customerName,customerPhone,invoiceNumber,orderDate,note,assignedBy:actor.name,deliveryAssigneeId,deliveryTimeSlot,createdAt:now});audit(state,actor,(assigneeId?"Gán":"Tạo")+" SKU "+product.sku+(assignee?.name?" cho "+assignee.name:"")+" · khách "+customerName);return {ok:true};}
       if(action==="reassignOrder"){if(!canManage(actor.role))return fail("Cần quyền Manager hoặc Admin",403);const assigneeId=asText(body.assigneeId),pickIds=Array.isArray(body.pickIds)?body.pickIds.map((id)=>asText(id)).filter(Boolean).slice(0,200):[],assignee=state.accounts.find((account)=>account.id===assigneeId&&account.active!==false);if(!assignee)return fail("Không tìm thấy nhân viên nhận đơn",404);if(!pickIds.length)return fail("Đơn hàng chưa có sản phẩm",400);const selected=new Set(pickIds),matches=state.picking.filter((item)=>selected.has(asText(item.id)));if(!matches.length)return fail("Không tìm thấy đơn hàng",404);for(const item of matches){item.userId=assigneeId;item.picked=false;item.pickedQuantity=0;item.workflowStatus="picking";item.assignedBy=actor.name;item.updatedAt=Date.now();}audit(state,actor,"Gán "+matches.length+" sản phẩm trong đơn cho "+assignee.name);return {ok:true,updated:matches.length};}
@@ -978,6 +1026,17 @@ app.post("/api/store", async (req, res, next) => {
     });
     res.status(result.status||200).json(result);
   } catch (error) { next(error); }
+});
+
+app.post("/api/customers/import", requireManager, upload.single("file"), async (req,res)=>{
+  if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel khách hàng .xlsx"});
+  if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
+  const tempPath=path.join(dataDir,"customer-import-"+randomUUID()+".xlsx");
+  try {
+    await fs.writeFile(tempPath,req.file.buffer);const parsed=parseCustomerRows(await readSheet(tempPath));
+    const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}audit(state,actor,"Nhập Master Data khách hàng: "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,created,updated,imported:parsed.records.length,skipped:parsed.skipped,total:state.customers.length};});
+    res.status(result.status||200).json(result);
+  }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}finally{await fs.unlink(tempPath).catch(()=>undefined);}
 });
 
 app.post("/api/master-data/import", requireManager, requireImportCapacity, masterUpload.single("file"), async (req, res, next) => {
