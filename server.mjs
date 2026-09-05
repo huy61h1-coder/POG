@@ -130,9 +130,11 @@ async function readCustomerWorkbook(source) {
   return candidates[0];
 }
 async function readPurchaseWorkbook(source,period){
-  const sheets=await readCustomerWorkbookSheets(source),candidates=[];
-  for(const sheet of Array.isArray(sheets)?sheets:[]){try{const parsed=parsePurchaseRows(sheet.data,{period});candidates.push({sheetName:asText(sheet.sheet),...parsed});}catch{/* Ignore cover/template sheets. */}}
-  if(!candidates.length)throw new Error("File Excel lịch sử mua hàng không có sheet chứa cột SĐT hợp lệ.");
+  const sheets=await readCustomerWorkbookSheets(source),allSheets=Array.isArray(sheets)?sheets:[],monthSheets=allSheets.filter((sheet)=>normalizeText(sheet.sheet).includes("thang"));
+  if(!monthSheets.length)throw new Error("File Excel lịch sử mua hàng cần có sheet có chữ “tháng” (ví dụ: Tháng 09 hoặc Tháng 09-2026).");
+  const candidates=[];
+  for(const sheet of monthSheets){try{const parsed=parsePurchaseRows(sheet.data,{period});candidates.push({sheetName:asText(sheet.sheet),...parsed});}catch{/* Ignore cover/template sheets inside the selected month worksheets. */}}
+  if(!candidates.length)throw new Error("Sheet có chữ “tháng” không chứa cột SĐT hợp lệ.");
   candidates.sort((left,right)=>right.records.length-left.records.length);return candidates[0];
 }
 const customerStorageFields=["name","status","vatExport","memberCard","group","companyName","email","taxId","vatAddress","deliveryAddress"];
