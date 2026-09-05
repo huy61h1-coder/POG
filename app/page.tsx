@@ -648,7 +648,7 @@ export default function Home() {
   const saveDailyReport=async(report:Record<string,unknown>)=>{
     setReportsBusy(true);
     try {
-      const response=await fetch("/api/store",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"upsertDailyReport",report})});
+      const response=await fetch("/api/daily-reports",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({report})});
       const result=await readApiJson<{error?:string;report?:DailyReport;customer?:CustomerMaster}>(response);
       if(response.status===401){setData(null);setAuthMode(result.error?"login":"login");throw new Error("Phiên đăng nhập đã hết hạn");}
       if(!response.ok||!result.report)throw new Error(result.error||"Không thể lưu báo cáo ngày");

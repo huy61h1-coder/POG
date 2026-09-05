@@ -139,7 +139,7 @@ async function readPurchaseWorkbook(source,period){
 }
 const customerStorageFields=["name","status","vatExport","memberCard","group","companyName","email","taxId","vatAddress","deliveryAddress"];
 const customerStorageColumns=["name","status","vat_export","member_card","group_name","company_name","email","tax_id","vat_address","delivery_address"];
-let customerStorageCache=null,customerStorageCacheAt=0,customerStorageReady=false,purchaseStorageReady=false;
+let customerStorageCache=null,customerStorageCacheAt=0,customerStorageReady=false,purchaseStorageReady=false,dailyReportsStorageReady=false;
 function invalidateCustomerStorageCache(){customerStorageCache=null;customerStorageCacheAt=0;}
 function normalizedCustomerRecord(source,now=Date.now()) {
   const fields=customerFieldsFromReport(source||{});
@@ -188,6 +188,48 @@ async function upsertPersistentCustomers(sources) {
   finally { client.release(); }
   invalidateCustomerStorageCache();const customers=await readPersistentCustomers(),total=customers.length;
   return {created,updated,total,customers};
+}
+
+const dailyReportDbColumns=DAILY_REPORT_COLUMNS.map(([key])=>key.replace(/[A-Z]/g,(letter)=>"_"+letter.toLowerCase()));
+const dailyReportNumericKeys=new Set(["invoiceValue","remainingInvoiceValue"]);
+function dailyReportFromStorageRow(row){
+  const report={id:asText(row.id)||randomUUID()};
+  DAILY_REPORT_COLUMNS.forEach(([key],index)=>{const value=row[dailyReportDbColumns[index]];report[key]=dailyReportNumericKeys.has(key)?Number(value)||0:asText(value);});
+  report.createdAt=asInt(row.created_at,Date.now());report.updatedAt=asInt(row.updated_at,report.createdAt);report.createdBy=asText(row.created_by);return report;
+}
+function normalizedDailyReportInput(source){
+  const input=source&&typeof source==="object"?source:{};
+  const report=Object.fromEntries(DAILY_REPORT_COLUMNS.map(([key])=>[key,asText(input[key]).slice(0,2000)]));
+  report.id=asText(input.id);
+  report.phone=normalizePhone(input.phone);report.date=normalizeOrderDate(input.date,Date.now());report.invoiceValue=Math.max(0,asDecimal(input.invoiceValue));report.remainingInvoiceValue=Math.max(0,asDecimal(input.remainingInvoiceValue));
+  if(report.phone.replace(/\D/g,"").length<8)return {error:"Số điện thoại khách hàng cần ít nhất 8 chữ số"};
+  if(!report.customerName)return {error:"Tên khách hàng là bắt buộc"};
+  if(!report.employeeName)return {error:"Tên nhân viên là bắt buộc"};
+  return {report,customerFields:customerFieldsFromReport(report)};
+}
+async function upsertPersistentCustomerWithClient(client,source){
+  const record=normalizedCustomerRecord(source);if(!record)return null;
+  const values=[record.id,record.phone,...customerStorageFields.map((field)=>record[field]),record.createdAt,record.updatedAt];
+  const updates=customerStorageColumns.map((column)=>`${column}=CASE WHEN EXCLUDED.${column}<>'' THEN EXCLUDED.${column} ELSE fulfillment_customers.${column} END`).join(",");
+  const result=await client.query(`INSERT INTO fulfillment_customers (id,phone,${customerStorageColumns.join(",")},created_at,updated_at) VALUES (${Array.from({length:14},(_,index)=>"$"+(index+1)).join(",")}) ON CONFLICT (phone) DO UPDATE SET ${updates},updated_at=EXCLUDED.updated_at RETURNING id,phone,name,status,vat_export,member_card,group_name,company_name,email,tax_id,vat_address,delivery_address,created_at,updated_at`,values);
+  invalidateCustomerStorageCache();return result.rows[0]?customerFromStorageRow(result.rows[0]):null;
+}
+async function upsertDailyReportWithClient(client,report,actorName){
+  const id=asText(report.id)||randomUUID(),now=Date.now(),createdAt=asInt(report.createdAt,now),createdBy=asText(report.createdBy,actorName);
+  const values=[id,...DAILY_REPORT_COLUMNS.map(([key])=>dailyReportNumericKeys.has(key)?Number(report[key])||0:asText(report[key]).slice(0,2000)),createdAt,now,createdBy];
+  const columns=["id",...dailyReportDbColumns,"created_at","updated_at","created_by"];
+  const updates=dailyReportDbColumns.map((column)=>`${column}=EXCLUDED.${column}`).concat(["updated_at=EXCLUDED.updated_at","created_by=fulfillment_daily_reports.created_by"]).join(",");
+  const result=await client.query(`INSERT INTO fulfillment_daily_reports (${columns.join(",")}) VALUES (${values.map((_,index)=>"$"+(index+1)).join(",")}) ON CONFLICT (id) DO UPDATE SET ${updates} RETURNING ${columns.join(",")}`,values);
+  return result.rows[0]?dailyReportFromStorageRow(result.rows[0]):null;
+}
+async function persistDailyReportFast(report,actorName){
+  const client=await pool.connect();
+  try { await client.query("BEGIN");const customer=customerStorageReady?await upsertPersistentCustomerWithClient(client,customerFieldsFromReport(report)):null;const savedReport=await upsertDailyReportWithClient(client,report,actorName);await client.query("COMMIT");return {report:savedReport,customer}; }
+  catch(error){await client.query("ROLLBACK").catch(()=>undefined);throw error;}
+  finally {client.release();}
+}
+async function readPersistentDailyReports(month){
+  const result=await pool.query(`SELECT id,${dailyReportDbColumns.join(",")},created_at,updated_at,created_by FROM fulfillment_daily_reports WHERE date LIKE $1 ORDER BY date DESC,created_at DESC`,[asText(month)+"%"]);return result.rows.map(dailyReportFromStorageRow);
 }
 function purchaseFromStorageRow(row){return {id:asText(row.source_key),period:asText(row.period),phone:normalizePhone(row.phone),customerName:asText(row.customer_name),address:asText(row.address),date:asText(row.purchase_date),invoiceNumber:asText(row.invoice_number),invoiceValue:Number(row.invoice_value)||0,products:asText(row.products),sourceName:asText(row.source_name),sourceRow:asInt(row.source_row),updatedAt:asInt(row.updated_at,Date.now())};}
 function purchaseRecordKey(record){return [asText(record.period),normalizePhone(record.phone),asText(record.date),asText(record.invoiceNumber),asInt(record.rowNumber,record.sourceRow)].join("|").slice(0,500);}
@@ -581,6 +623,28 @@ class StateStore {
         purchaseStorageReady=false;
         console.warn("Purchase history table is unavailable; using durable fulfillment_state fallback:",error instanceof Error?error.message:error);
       }
+      try {
+        await pool.query(`CREATE TABLE IF NOT EXISTS fulfillment_daily_reports (
+          id TEXT PRIMARY KEY,
+          employee_name TEXT NOT NULL DEFAULT '', date TEXT NOT NULL, phone TEXT NOT NULL,
+          customer_name TEXT NOT NULL DEFAULT '', customer_status TEXT NOT NULL DEFAULT '', vat_export TEXT NOT NULL DEFAULT '',
+          order_type TEXT NOT NULL DEFAULT '', invoice_number TEXT NOT NULL DEFAULT '', invoice_value NUMERIC NOT NULL DEFAULT 0,
+          payment_method TEXT NOT NULL DEFAULT '', cdo_number TEXT NOT NULL DEFAULT '', cod_number TEXT NOT NULL DEFAULT '',
+          carrier TEXT NOT NULL DEFAULT '', return_status TEXT NOT NULL DEFAULT '', remaining_invoice_value NUMERIC NOT NULL DEFAULT 0,
+          member_card TEXT NOT NULL DEFAULT '', customer_group TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', tax_id TEXT NOT NULL DEFAULT '',
+          vat_address TEXT NOT NULL DEFAULT '', delivery_address TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+          created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, created_by TEXT NOT NULL DEFAULT ''
+        )`);
+        const count=Number((await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_daily_reports")).rows[0]?.count)||0;
+        if(count===0){
+          const legacy=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);
+          if(legacy.dailyReports.length){const client=await pool.connect();try{await client.query("BEGIN");for(const report of legacy.dailyReports)await upsertDailyReportWithClient(client,report,report.createdBy);await client.query("COMMIT");}catch(error){await client.query("ROLLBACK").catch(()=>undefined);throw error;}finally{client.release();}}
+        }
+        dailyReportsStorageReady=true;
+      } catch(error) {
+        dailyReportsStorageReady=false;
+        console.warn("Daily report table is unavailable; using durable fulfillment_state fallback:",error instanceof Error?error.message:error);
+      }
     } else {
       mkdirSync(path.dirname(statePath), { recursive: true });
       if (!existsSync(statePath)){
@@ -605,11 +669,12 @@ class StateStore {
       }
     }
   }
-  async read() {
+  async read(options={}) {
+    const includeSidecars=options.includeSidecars!==false;
     // Keep one normalized in-memory snapshot for short read bursts (typing in
     // search, opening POG, switching filters). Mutations refresh it immediately,
     // so a longer TTL avoids reparsing the full Master Data JSON on every key.
-    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);if(purchaseStorageReady)fresh.purchaseHistory=await readPersistentPurchaseHistory(fresh.purchaseHistory);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(includeSidecars&&customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);if(includeSidecars&&purchaseStorageReady)fresh.purchaseHistory=await readPersistentPurchaseHistory(fresh.purchaseHistory);if(includeSidecars){this.remoteState=fresh;this.remoteStateAt=Date.now();}return fresh; }
     if(!this.localState){
       try { this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8"))); }
       catch(error){
@@ -1016,8 +1081,31 @@ app.get("/api/daily-reports",async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
     const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7);
-    const reports=state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.createdAt).localeCompare(String(a.createdAt)));
-    res.set("Cache-Control","no-store").json({reports,customers:state.customers,month});
+    const reports=dailyReportsStorageReady?await readPersistentDailyReports(month):state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.set("Cache-Control","no-store").json({reports,customers:state.customers,month,storage:dailyReportsStorageReady?"postgres":"state"});
+  } catch(error){next(error);}
+});
+
+// Daily reports have their own compact table in PostgreSQL. This avoids
+// locking and rewriting the large fulfillment_state JSON document on every
+// keystroke/save while keeping the JSON store as a local fallback.
+app.post("/api/daily-reports",async(req,res,next)=>{
+  try {
+    const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const normalized=normalizedDailyReportInput(req.body?.report);if(normalized.error)return res.status(400).json({error:normalized.error});
+    if(dailyReportsStorageReady){
+      const persisted=await persistDailyReportFast(normalized.report,actor.name);
+      return res.json({ok:true,report:persisted.report,customer:persisted.customer,storage:"postgres"});
+    }
+    const result=await store.mutate(async(current)=>{
+      const now=Date.now(),existingCustomer=current.customers.find((customer)=>normalizePhone(customer.phone)===normalized.report.phone),savedCustomer=existingCustomer?Object.assign(existingCustomer,normalized.customerFields,{updatedAt:now}):{id:randomUUID(),...normalized.customerFields,createdAt:now,updatedAt:now};
+      if(!existingCustomer)current.customers.push(savedCustomer);
+      if(pool&&customerStorageReady)await upsertPersistentCustomers([normalized.customerFields]);
+      const source=req.body?.report||{},id=asText(source.id),existingReport=id?current.dailyReports.find((item)=>item.id===id):null,savedReport=existingReport?Object.assign(existingReport,normalized.report,{id:existingReport.id,updatedAt:now}):{id:randomUUID(),...normalized.report,createdAt:now,updatedAt:now,createdBy:actor.name};
+      if(!existingReport)current.dailyReports.unshift(savedReport);
+      audit(current,actor,(existingReport?"Cập nhật":"Tạo")+" báo cáo ngày cho khách "+normalized.report.customerName);return {ok:true,report:savedReport,customer:savedCustomer,storage:"state"};
+    });
+    return res.status(result.status||200).json(result);
   } catch(error){next(error);}
 });
 
@@ -1073,7 +1161,7 @@ app.get("/api/customers",async(req,res,next)=>{
 app.get("/api/daily-reports/export.xlsx",async(req,res,next)=>{
   try {
     const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),reports=state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),reports=dailyReportsStorageReady?await readPersistentDailyReports(month):state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
     const headers=["STT",...DAILY_REPORT_COLUMNS.map(([,label])=>label)],rows=[headers,...reports.map((report,index)=>[index+1,...DAILY_REPORT_COLUMNS.map(([key])=>report[key]??"")])];
     const workbook=createXlsx(rows),filename=`Bao_cao_ngay_${month}.xlsx`;
     res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
@@ -1101,6 +1189,14 @@ app.get(["/api/master-data/export.xlsx","/api/master-data/export.csv"],async(req
 
 app.post("/api/store", async (req, res, next) => {
   try {
+    // Keep the legacy action compatible with older clients, but route it to
+    // the compact report table so it is just as fast as /api/daily-reports.
+    if(asText(req.body?.action)==="upsertDailyReport"&&dailyReportsStorageReady){
+      const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+      const normalized=normalizedDailyReportInput(req.body?.report);if(normalized.error)return res.status(400).json({error:normalized.error});
+      const persisted=await persistDailyReportFast(normalized.report,actor.name);
+      return res.json({ok:true,report:persisted.report,customer:persisted.customer,storage:"postgres"});
+    }
     const result = await store.mutate(async(state) => {
       const actor = actorFrom(req, state), body = req.body || {}, action = asText(body.action);
       const fail = (error, status = 400) => ({ error, status });
