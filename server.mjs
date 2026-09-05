@@ -11,7 +11,7 @@ import { Worker } from "node:worker_threads";
 import { strToU8, zipSync } from "fflate";
 import { normalizeImageUrl, normalizeMasterProduct } from "./lib/master-data.mjs";
 import { DAILY_REPORT_COLUMNS, parseCustomerRows, customerFieldsFromReport } from "./lib/customer-data.mjs";
-import { readSheet } from "read-excel-file/node";
+import readExcelFile from "read-excel-file/node";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
@@ -85,6 +85,19 @@ function localDateKey(value=Date.now()) {
 function normalizeOrderDate(value,fallback=Date.now()) {
   const text=asText(value);
   return /^\d{4}-\d{2}-\d{2}$/.test(text)?text:localDateKey(fallback);
+}
+async function readCustomerWorkbook(filePath) {
+  const sheets=await readExcelFile(filePath);
+  const candidates=[];
+  for(const sheet of Array.isArray(sheets)?sheets:[]){
+    try {
+      const parsed=parseCustomerRows(sheet.data);
+      candidates.push({sheetName:asText(sheet.sheet),...parsed});
+    } catch { /* Ignore cover, template, and unrelated sheets. */ }
+  }
+  if(!candidates.length)throw new Error("File Excel khách hàng không có sheet chứa cột SĐT và TÊN KHÁCH HÀNG.");
+  candidates.sort((left,right)=>right.records.length-left.records.length);
+  return candidates[0];
 }
 const defaultLineNames = new Map(lineDefaults.map(([line,name]) => [line,name.toUpperCase()]));
 function ensureStateShape(source) {
@@ -1033,8 +1046,8 @@ app.post("/api/customers/import", requireManager, upload.single("file"), async (
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
   const tempPath=path.join(dataDir,"customer-import-"+randomUUID()+".xlsx");
   try {
-    await fs.writeFile(tempPath,req.file.buffer);const parsed=parseCustomerRows(await readSheet(tempPath));
-    const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}audit(state,actor,"Nhập Master Data khách hàng: "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,created,updated,imported:parsed.records.length,skipped:parsed.skipped,total:state.customers.length};});
+    await fs.writeFile(tempPath,req.file.buffer);const parsed=await readCustomerWorkbook(tempPath);
+    const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}audit(state,actor,"Nhập Master Data khách hàng ("+(parsed.sheetName||"sheet")+"): "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created,updated,imported:parsed.records.length,skipped:parsed.skipped,total:state.customers.length};});
     res.status(result.status||200).json(result);
   }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}finally{await fs.unlink(tempPath).catch(()=>undefined);}
 });
