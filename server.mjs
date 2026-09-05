@@ -23,6 +23,7 @@ const uploadDir = path.resolve(root, process.env.UPLOAD_DIR || path.join(dataDir
 const importDir = path.join(dataDir,"master-imports");
 const statePath = path.join(dataDir, "store.json");
 const stateBackupPath = path.join(dataDir, "store.backup.json");
+const purchaseHistoryPath = path.join(dataDir, "purchase-history.json");
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
 const dataDirRelativeToRoot = path.relative(root,dataDir);
 const dataDirInsideProject = !dataDirRelativeToRoot || (!dataDirRelativeToRoot.startsWith(".."+path.sep) && dataDirRelativeToRoot!=="..");
@@ -232,6 +233,14 @@ async function readPersistentDailyReports(month){
   const result=await pool.query(`SELECT id,${dailyReportDbColumns.join(",")},created_at,updated_at,created_by FROM fulfillment_daily_reports WHERE date LIKE $1 ORDER BY date DESC,created_at DESC`,[asText(month)+"%"]);return result.rows.map(dailyReportFromStorageRow);
 }
 function purchaseFromStorageRow(row){return {id:asText(row.source_key),period:asText(row.period),phone:normalizePhone(row.phone),customerName:asText(row.customer_name),address:asText(row.address),date:asText(row.purchase_date),invoiceNumber:asText(row.invoice_number),invoiceValue:Number(row.invoice_value)||0,products:asText(row.products),sourceName:asText(row.source_name),sourceRow:asInt(row.source_row),updatedAt:asInt(row.updated_at,Date.now())};}
+function normalizeLocalPurchaseRecords(records){return (Array.isArray(records)?records:[]).filter((item)=>asText(item?.period)&&normalizePhone(item?.phone)).map((item)=>({id:asText(item.id)||purchaseRecordKey(item),period:asText(item.period),phone:normalizePhone(item.phone),customerName:asText(item.customerName),address:asText(item.address),date:asText(item.date),invoiceNumber:asText(item.invoiceNumber),invoiceValue:Number(item.invoiceValue)||0,products:asText(item.products),sourceName:asText(item.sourceName),sourceRow:asInt(item.sourceRow),updatedAt:asInt(item.updatedAt,Date.now())}));}
+async function readLocalPurchaseHistory(fallback=[]){
+  try { const parsed=JSON.parse(await fs.readFile(purchaseHistoryPath,"utf8"));return normalizeLocalPurchaseRecords(parsed); }
+  catch { const records=normalizeLocalPurchaseRecords(fallback);if(records.length)void writeLocalPurchaseHistory(records).catch((error)=>console.warn("Could not initialize local purchase history file:",error instanceof Error?error.message:error));return records; }
+}
+async function writeLocalPurchaseHistory(records){
+  const tempPath=purchaseHistoryPath+"."+randomUUID()+".tmp";await fs.writeFile(tempPath,JSON.stringify(normalizeLocalPurchaseRecords(records)),{mode:0o600});try{await fs.rename(tempPath,purchaseHistoryPath);}catch(error){await fs.unlink(tempPath).catch(()=>undefined);throw error;}
+}
 function purchaseRecordKey(record){return [asText(record.period),normalizePhone(record.phone),asText(record.date),asText(record.invoiceNumber),asInt(record.rowNumber,record.sourceRow)].join("|").slice(0,500);}
 async function readPersistentPurchaseHistory(fallback=[],year=""){
   if(!pool||!purchaseStorageReady)return fallback;
@@ -720,9 +729,11 @@ class StateStore {
   }
   replaceCustomers(customers) {
     if(this.remoteState)this.remoteState.customers=(Array.isArray(customers)?customers:[]).map((customer)=>({...customer}));
+    if(this.localState)this.localState.customers=(Array.isArray(customers)?customers:[]).map((customer)=>({...customer}));
   }
   replacePurchaseHistory(records) {
     if(this.remoteState)this.remoteState.purchaseHistory=(Array.isArray(records)?records:[]).map((record)=>({...record}));
+    if(this.localState)this.localState.purchaseHistory=(Array.isArray(records)?records:[]).map((record)=>({...record}));
   }
   removePurchasePeriod(period) {
     if(this.remoteState)this.remoteState.purchaseHistory=this.remoteState.purchaseHistory.filter((record)=>record.period!==period);
@@ -1119,7 +1130,7 @@ app.post("/api/daily-reports",async(req,res,next)=>{
 app.get("/api/purchase-history",async(req,res,next)=>{
   try {
     const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory,month.slice(0,4)):state.purchaseHistory;
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory,month.slice(0,4)):await readLocalPurchaseHistory(state.purchaseHistory);
     res.set("Cache-Control","no-store").json({...purchaseSummary(records,month),storage:purchaseStorageReady?"postgres":"state"});
   } catch(error){next(error);}
 });
@@ -1127,7 +1138,7 @@ app.get("/api/purchase-history",async(req,res,next)=>{
 app.get("/api/purchase-history/export.xlsx",async(req,res,next)=>{
   try {
     const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory,month.slice(0,4)):state.purchaseHistory,summary=purchaseSummary(records,month),rows=[["SĐT","TÊN KHÁCH HÀNG","ĐỊA CHỈ","TỔNG THÁNG "+month,"TỔNG NĂM "+summary.year,"SỐ ĐƠN TRONG NĂM",...Array.from({length:12},(_,index)=>`${summary.year}-${String(index+1).padStart(2,"0")}`)],...summary.customers.map((customer)=>[customer.phone,customer.customerName,customer.address,customer.monthTotal,customer.yearTotal,customer.orders,...Array.from({length:12},(_,index)=>customer.monthlyTotals[`${summary.year}-${String(index+1).padStart(2,"0")}`]||0)])];
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory,month.slice(0,4)):await readLocalPurchaseHistory(state.purchaseHistory),summary=purchaseSummary(records,month),rows=[["SĐT","TÊN KHÁCH HÀNG","ĐỊA CHỈ","TỔNG THÁNG "+month,"TỔNG NĂM "+summary.year,"SỐ ĐƠN TRONG NĂM",...Array.from({length:12},(_,index)=>`${summary.year}-${String(index+1).padStart(2,"0")}`)],...summary.customers.map((customer)=>[customer.phone,customer.customerName,customer.address,customer.monthTotal,customer.yearTotal,customer.orders,...Array.from({length:12},(_,index)=>customer.monthlyTotals[`${summary.year}-${String(index+1).padStart(2,"0")}`]||0)])];
     const workbook=createXlsx(rows),filename=`Lich_su_mua_hang_${month}.xlsx`;res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
   } catch(error){next(error);}
 });
@@ -1141,8 +1152,9 @@ app.delete("/api/purchase-history",requireManager,async(req,res,next)=>{
       store.removePurchasePeriod(period);
       return res.json({ok:true,period,deleted:deleted.rowCount||0,total,storage:"postgres"});
     }
-    const result=await store.mutate((state)=>{const before=state.purchaseHistory.length;state.purchaseHistory=state.purchaseHistory.filter((record)=>record.period!==period);audit(state,req.fulfillmentActor,"Xóa lịch sử mua hàng tháng "+period);return {ok:true,period,deleted:before-state.purchaseHistory.length,total:state.purchaseHistory.length,storage:"state"};});
-    return res.status(result.status||200).json(result);
+    const state=await store.read({includeSidecars:false}),records=await readLocalPurchaseHistory(state.purchaseHistory),remaining=records.filter((record)=>record.period!==period),deleted=records.length-remaining.length;
+    await writeLocalPurchaseHistory(remaining);store.replacePurchaseHistory(remaining);
+    return res.json({ok:true,period,deleted,total:remaining.length,storage:"local-file"});
   } catch(error){next(error);}
 });
 
@@ -1153,7 +1165,10 @@ app.post("/api/purchase-history/import",requireManager,upload.single("file"),asy
   try {
     const parsed=await readPurchaseWorkbook(req.file.buffer,period),records=parsed.records.map((record)=>normalizedPurchaseRecord(record,period,req.file.originalname));
     if(purchaseStorageReady){const persisted=await upsertPersistentPurchaseHistory(records,req.file.originalname),total=Number((await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_purchase_history")).rows[0]?.count)||0;return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created:persisted.created,updated:persisted.updated,imported:persisted.imported,skipped:parsed.skipped,total,storage:"postgres"});}
-    const result=await store.mutate((state)=>{const actor=actorFrom(req,state),current=new Map(state.purchaseHistory.map((item)=>[item.id,item]));let created=0,updated=0;for(const record of records){if(current.has(record.id))updated++;else created++;current.set(record.id,record);}state.purchaseHistory=[...current.values()].sort((left,right)=>String(right.date).localeCompare(String(left.date)));audit(state,actor,"Nhập lịch sử mua hàng "+period+": "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created,updated,imported:records.length,skipped:parsed.skipped,total:state.purchaseHistory.length,storage:"state"};});res.status(result.status||200).json(result);
+    const state=await store.read({includeSidecars:false}),current=new Map((await readLocalPurchaseHistory(state.purchaseHistory)).map((item)=>[item.id,item]));let created=0,updated=0;
+    for(const record of records){if(current.has(record.id))updated++;else created++;current.set(record.id,record);}
+    const all=[...current.values()].sort((left,right)=>String(right.date).localeCompare(String(left.date)));await writeLocalPurchaseHistory(all);store.replacePurchaseHistory(all);
+    return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created,updated,imported:records.length,skipped:parsed.skipped,total:all.length,storage:"local-file"});
   } catch(error){next(error);}
 });
 
