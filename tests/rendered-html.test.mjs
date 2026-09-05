@@ -132,6 +132,14 @@ try{
   assert.equal(updated.actor.userId,data.actor.userId);
   assert.equal(updated.picking[0].quantity,3);
 
+  const dailyReport={employeeName:"Nhân viên kiểm thử",date:"2026-09-05",phone:"0901234567",customerName:"Khách báo cáo",invoiceValue:"125000"};
+  const createReport=await fetch(origin+"/api/daily-reports",{method:"POST",headers,body:JSON.stringify({report:dailyReport})});assert.equal(createReport.status,200);
+  const savedReport=(await createReport.json()).report;assert.ok(savedReport.id);
+  const updateReport=await fetch(origin+"/api/daily-reports",{method:"POST",headers,body:JSON.stringify({report:{...dailyReport,id:savedReport.id,customerName:"Khách báo cáo đã sửa"}})});assert.equal(updateReport.status,200);
+  const reportList=await (await fetch(origin+"/api/daily-reports?month=2026-09",{headers:{cookie}})).json();assert.equal(reportList.reports.length,1);assert.equal(reportList.reports[0].customerName,"Khách báo cáo đã sửa");
+  const deleteReport=await fetch(origin+"/api/daily-reports/"+encodeURIComponent(savedReport.id),{method:"DELETE",headers:{cookie}});assert.equal(deleteReport.status,200);
+  const emptyReportList=await (await fetch(origin+"/api/daily-reports?month=2026-09",{headers:{cookie}})).json();assert.equal(emptyReportList.reports.length,0);
+
   const firstPogForm=new FormData();firstPogForm.set("line","16");firstPogForm.set("side","A");firstPogForm.set("file",new Blob(["first-pog"],{type:"application/pdf"}),"pog-part-1.pdf");
   const firstPogResponse=await fetch(origin+"/api/pog",{method:"POST",headers:{cookie},body:firstPogForm});assert.equal(firstPogResponse.status,200);assert.equal((await firstPogResponse.json()).fileCount,1);
   const secondPogForm=new FormData();secondPogForm.set("line","16");secondPogForm.set("side","A");secondPogForm.set("mode","append");secondPogForm.set("file",new Blob(["second-pog"],{type:"application/pdf"}),"pog-part-2.pdf");

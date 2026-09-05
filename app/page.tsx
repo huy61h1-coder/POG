@@ -988,14 +988,26 @@ function AssignPickModal({product,customerNames,onClose,onAssign}:{product:Produ
 const dailyReportFields:[keyof DailyReport,string,boolean][]=[
   ["employeeName","Tên nhân viên",false],["date","Ngày",false],["phone","SĐT",true],["customerName","Tên khách hàng",true],["customerStatus","Tình trạng KH",true],["vatExport","Xuất VAT",true],["orderType","Loại đơn",false],["invoiceNumber","Số hóa đơn",false],["invoiceValue","Giá trị hóa đơn",false],["paymentMethod","Phương thức thanh toán",false],["cdoNumber","Số CDO",false],["codNumber","Số COD",false],["carrier","Nhà vận chuyển",false],["returnStatus","Hủy/đổi/trả hàng",false],["remainingInvoiceValue","Giá trị hóa đơn còn lại",false],["memberCard","Thẻ thành viên",true],["customerGroup","Nhóm KH",true],["email","Email",true],["taxId","MST",true],["vatAddress","Địa chỉ xuất VAT",true],["deliveryAddress","Địa chỉ giao hàng",true]
 ];
-function DailyReportHistoryView({reports,month,onEdit}:{reports:DailyReport[];month:string;onEdit:(report:DailyReport)=>void}) {
+function DailyReportHistoryView({reports:sourceReports,month,onEdit}:{reports:DailyReport[];month:string;onEdit:(report:DailyReport)=>void}) {
+  const [deletedIds,setDeletedIds]=useState<Set<string>>(new Set()),[deletingId,setDeletingId]=useState("");
+  const reports=sourceReports.filter((report)=>!deletedIds.has(report.id)),canDelete=true;
+  const onDelete=async(report:DailyReport)=>{
+    if(deletingId||!window.confirm(`Xóa báo cáo của ${report.customerName||"khách hàng này"} ngày ${report.date}? Dữ liệu đã xóa không thể khôi phục.`))return;
+    setDeletingId(report.id);
+    try {
+      const response=await fetch("/api/daily-reports/"+encodeURIComponent(report.id),{method:"DELETE"}),result=await readApiJson<{error?:string}>(response);
+      if(!response.ok)throw new Error(result.error||"Không thể xóa báo cáo ngày");
+      setDeletedIds((current)=>new Set([...current,report.id]));
+    } catch(cause) { window.alert(cause instanceof Error?cause.message:"Không thể xóa báo cáo ngày"); }
+    finally { setDeletingId(""); }
+  };
   const displayValue=(report:DailyReport,key:keyof DailyReport)=>{
     const value=report[key];
     if ((key==="invoiceValue"||key==="remainingInvoiceValue")&&value!==""&&value!==null&&value!==undefined) return decimalMoney.format(Number(value));
     const text=String(value??"").trim();
     return text||"—";
   };
-  return <section className="panel daily-report-list"><div className="panel-title"><div><h2>Lịch sử nhập báo cáo tháng {month}</h2><span>Hiển thị toàn bộ thông tin đã nhập · bấm vào một dòng để mở lại và chỉnh sửa.</span></div><b>{reports.length} báo cáo</b></div><div className="table-wrap"><table className="compact-table report-table daily-report-history-table"><thead><tr><th>STT</th>{dailyReportFields.map(([,label])=><th key={label}>{label}</th>)}</tr></thead><tbody>{reports.map((report,index)=><tr key={report.id} onClick={()=>onEdit(report)}><td>{index+1}</td>{dailyReportFields.map(([key])=><td key={String(key)}>{displayValue(report,key)}</td>)}</tr>)}{!reports.length&&<tr><td colSpan={dailyReportFields.length+1}><div className="empty big"><b>Chưa có báo cáo trong tháng này</b><span>Các báo cáo bạn nhập sẽ được lưu và hiển thị tại đây.</span></div></td></tr>}</tbody></table></div></section>;
+  return <section className="panel daily-report-list"><div className="panel-title"><div><h2>Lịch sử nhập báo cáo tháng {month}</h2><span>Chọn Sửa để mở lại biểu mẫu; chỉ Manager/Admin có thể xóa.</span></div><b>{reports.length} báo cáo</b></div><div className="table-wrap"><table className="compact-table report-table daily-report-history-table"><thead><tr><th>STT</th>{dailyReportFields.map(([,label])=><th key={label}>{label}</th>)}<th>Thao tác</th></tr></thead><tbody>{reports.map((report,index)=><tr key={report.id} onClick={()=>onEdit(report)}><td>{index+1}</td>{dailyReportFields.map(([key])=><td key={String(key)}>{displayValue(report,key)}</td>)}<td><div className="report-history-actions"><button type="button" onClick={(event)=>{event.stopPropagation();onEdit(report);}}>Sửa</button>{canDelete&&<button type="button" className="danger-text" onClick={(event)=>{event.stopPropagation();onDelete(report);}}>Xóa</button>}</div></td></tr>)}{!reports.length&&<tr><td colSpan={dailyReportFields.length+2}><div className="empty big"><b>Chưa có báo cáo trong tháng này</b><span>Các báo cáo bạn nhập sẽ được lưu và hiển thị tại đây.</span></div></td></tr>}</tbody></table></div></section>;
 }
 
 function PurchaseHistoryView({summary,month,onMonth,onImport,onExport,onDelete,canManage,busy}:{summary:PurchaseHistorySummary;month:string;onMonth:(value:string)=>void;onImport:()=>void;onExport:(month:string)=>void;onDelete:(month:string)=>void;canManage:boolean;busy:boolean}) {
