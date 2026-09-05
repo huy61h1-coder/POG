@@ -89,6 +89,20 @@ async function writeLocalState(state) {
 
 function asText(value, fallback = "") { return typeof value === "string" ? value.trim() : fallback; }
 function asInt(value, fallback = 0) { const n = Number(value); return Number.isFinite(n) ? Math.trunc(n) : fallback; }
+function asDecimal(value, fallback = 0) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+  const raw = asText(value);
+  if (!raw) return fallback;
+  const compact = raw.replace(/\s/g, ""), comma = compact.lastIndexOf(","), dot = compact.lastIndexOf(".");
+  let normalized = compact;
+  if (comma >= 0 && dot >= 0) normalized = comma > dot ? compact.replace(/\./g, "").replace(",", ".") : compact.replace(/,/g, "");
+  else if (comma >= 0) {
+    const parts = compact.split(",");
+    normalized = parts.length > 2 || (parts.length === 2 && parts[1].length === 3) ? compact.replace(/,/g, "") : compact.replace(",", ".");
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
 function cleanLine(value) { const digits=asText(value, "01").replace(/\D/g, ""); return (digits||"1").padStart(2, "0").slice(0, 3); }
 function canManage(role) { const normalized=String(role||"").toUpperCase(); return normalized === "ADMIN" || normalized === "MANAGER"; }
 function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[đĐ]/g,"d").toLowerCase(); }
@@ -1166,7 +1180,7 @@ app.post("/api/store", async (req, res, next) => {
       }
       if(action==="upsertDailyReport"){
         const source=body.report||{},report=Object.fromEntries(DAILY_REPORT_COLUMNS.map(([key])=>[key,asText(source[key]).slice(0,2000)]));
-        report.phone=normalizePhone(source.phone);report.date=normalizeOrderDate(source.date,Date.now());report.invoiceValue=Math.max(0,Number(String(source.invoiceValue??"").replace(/,/g,""))||0);report.remainingInvoiceValue=Math.max(0,Number(String(source.remainingInvoiceValue??"").replace(/,/g,""))||0);
+        report.phone=normalizePhone(source.phone);report.date=normalizeOrderDate(source.date,Date.now());report.invoiceValue=Math.max(0,asDecimal(source.invoiceValue));report.remainingInvoiceValue=Math.max(0,asDecimal(source.remainingInvoiceValue));
         if(report.phone.replace(/\D/g,"").length<8)return fail("Số điện thoại khách hàng cần ít nhất 8 chữ số");if(!report.customerName)return fail("Tên khách hàng là bắt buộc");if(!report.employeeName)return fail("Tên nhân viên là bắt buộc");
         const customerFields=customerFieldsFromReport(report),now=Date.now(),existingCustomer=state.customers.find((customer)=>normalizePhone(customer.phone)===report.phone);
         if(pool&&customerStorageReady)await upsertPersistentCustomers([customerFields]);
