@@ -62,6 +62,21 @@ function AppIcon({name}:{name:Tab}) {
 const emptyProduct: Product = { id:"",sku:"",name:"",division:"",divisionName:"",department:"",departmentName:"",supplierBarcode:"",barcode:"",line:"01",lineName:"SOUVENIR",side:"A",bay:1,price:0,promoPrice:0,stock:0,loss:0,expDate:"" };
 const money = new Intl.NumberFormat("vi-VN");
 const decimalMoney = new Intl.NumberFormat("en-US",{minimumFractionDigits:0,maximumFractionDigits:2});
+function formatInvoiceInput(value:unknown) {
+  const raw=String(value??"").replace(/[^\d.,]/g,"");
+  if(!raw)return "";
+  const lastDot=raw.lastIndexOf("."),lastComma=raw.lastIndexOf(",");
+  let decimalSeparator="";
+  if(lastDot>=0&&lastComma>=0)decimalSeparator=lastDot>lastComma?".":",";
+  else if(lastDot>=0)decimalSeparator=".";
+  else if(lastComma>=0&&raw.length-lastComma-1<3)decimalSeparator=",";
+  const separatorIndex=decimalSeparator?raw.lastIndexOf(decimalSeparator):-1;
+  const integerSource=(separatorIndex>=0?raw.slice(0,separatorIndex):raw).replace(/\D/g,"");
+  const decimalSource=separatorIndex>=0?raw.slice(separatorIndex+1).replace(/\D/g,""):"";
+  const integer=(integerSource||"0").replace(/^0+(?=\d)/,"");
+  const grouped=integer.replace(/\B(?=(\d{3})+(?!\d))/g,",");
+  return grouped+(decimalSeparator?(raw.endsWith(decimalSeparator)||decimalSource?"."+decimalSource:""):"");
+}
 const normalize = (value:unknown) => String(value??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[đĐ]/g,"d").toLowerCase().trim();
 const orderDateKey = (value:unknown) => {
   const text=String(value??"").trim();
@@ -966,9 +981,10 @@ function PurchaseHistoryView({summary,month,onMonth,onImport,onExport,canManage,
 function DailyReportFieldSections({form,onChange,carrierUsers}:{form:Record<string,string>;onChange:(key:string,value:string)=>void;carrierUsers:UserRole[]}) {
   const compactKeys=new Set(["employeeName","orderType","date","phone","customerName","customerStatus","vatExport","invoiceNumber","invoiceValue","paymentMethod","cdoNumber","codNumber","returnStatus","remainingInvoiceValue","customerGroup","taxId"]);
   const renderField=([key,label,isLinked]:typeof dailyReportFields[number])=>{
-    const type=key==="date"?"date":key==="invoiceValue"||key==="remainingInvoiceValue"?"number":"text";
+    const isInvoiceValue=key==="invoiceValue"||key==="remainingInvoiceValue",type=key==="date"?"date":isInvoiceValue?"text":"text";
     const wide=key==="vatAddress"||key==="deliveryAddress"||key==="note",compact=compactKeys.has(String(key));
-    const input=key==="carrier"?<select value={form[String(key)]||""} onChange={(event)=>onChange(String(key),event.target.value)}><option value="">Chọn nhà vận chuyển</option><option value="Ahamove">Ahamove</option>{carrierUsers.map((user)=><option key={user.userId} value={user.name}>{user.name}</option>)}</select>:<input type={type} step={type==="number"?"0.01":undefined} inputMode={type==="number"?"decimal":undefined} value={form[String(key)]||""} onChange={(event)=>onChange(String(key),event.target.value)} placeholder={key==="phone"?"Nhập SĐT để tra cứu khách hàng":label}/>;
+    const paymentOptions=["Tiền mặt","Chuyển khoản","Cà thẻ","COD"],invoiceValue=form[String(key)]||"";
+    const input=key==="carrier"?<select value={form.carrier||""} onChange={(event)=>onChange("carrier",event.target.value)}><option value="">Chọn nhà vận chuyển</option><option value="Ahamove">Ahamove</option>{carrierUsers.map((user)=><option key={user.userId} value={user.name}>{user.name}</option>)}</select>:key==="paymentMethod"?<select value={form.paymentMethod||""} onChange={(event)=>onChange("paymentMethod",event.target.value)}><option value="">Chọn phương thức thanh toán</option>{paymentOptions.map((option)=><option key={option} value={option}>{option}</option>)}</select>:<input type={type} inputMode={isInvoiceValue?"decimal":type==="number"?"decimal":undefined} value={isInvoiceValue?formatInvoiceInput(invoiceValue):invoiceValue} onChange={(event)=>onChange(String(key),isInvoiceValue?formatInvoiceInput(event.target.value):event.target.value)} placeholder={key==="phone"?"Nhập SĐT để tra cứu khách hàng":label}/>;
     return <label key={String(key)} className={(compact?"compact-report-field ":"")+(isLinked?"customer-linked-field ":"")+(wide?"wide":"")}><span>{label}{isLinked&&<i>●</i>}</span>{input}</label>;
   };
   const manualFields=dailyReportFields.filter(([key,,isLinked])=>!isLinked||key==="phone");
