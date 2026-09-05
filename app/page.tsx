@@ -1007,7 +1007,16 @@ function DailyReportHistoryView({reports:sourceReports,month,onEdit}:{reports:Da
     const text=String(value??"").trim();
     return text||"—";
   };
-  return <section className="panel daily-report-list"><div className="panel-title"><div><h2>Lịch sử nhập báo cáo tháng {month}</h2><span>Chọn Sửa để mở lại biểu mẫu; chỉ Manager/Admin có thể xóa.</span></div><b>{reports.length} báo cáo</b></div><div className="table-wrap"><table className="compact-table report-table daily-report-history-table"><thead><tr><th>STT</th>{dailyReportFields.map(([,label])=><th key={label}>{label}</th>)}<th>Thao tác</th></tr></thead><tbody>{reports.map((report,index)=><tr key={report.id} onClick={()=>onEdit(report)}><td>{index+1}</td>{dailyReportFields.map(([key])=><td key={String(key)}>{displayValue(report,key)}</td>)}<td><div className="report-history-actions"><button type="button" onClick={(event)=>{event.stopPropagation();onEdit(report);}}>Sửa</button>{canDelete&&<button type="button" className="danger-text" onClick={(event)=>{event.stopPropagation();onDelete(report);}}>Xóa</button>}</div></td></tr>)}{!reports.length&&<tr><td colSpan={dailyReportFields.length+2}><div className="empty big"><b>Chưa có báo cáo trong tháng này</b><span>Các báo cáo bạn nhập sẽ được lưu và hiển thị tại đây.</span></div></td></tr>}</tbody></table></div></section>;
+  return <section className="panel daily-report-list">
+    <div className="panel-title"><div><h2>Lịch sử nhập báo cáo tháng {month}</h2><span>Chọn Sửa để mở lại biểu mẫu; chỉ Manager/Admin có thể xóa.</span></div><b>{reports.length} báo cáo</b></div>
+    <div className="table-wrap"><table className="compact-table report-table daily-report-history-table">
+      <thead><tr><th>Thao tác</th><th>STT</th>{dailyReportFields.map(([,label])=><th key={label}>{label}</th>)}</tr></thead>
+      <tbody>{reports.map((report,index)=><tr key={report.id} onClick={()=>onEdit(report)}>
+        <td><div className="report-history-actions"><button type="button" onClick={(event)=>{event.stopPropagation();onEdit(report);}}>Sửa</button>{canDelete&&<button type="button" className="danger-text" disabled={deletingId===report.id} onClick={(event)=>{event.stopPropagation();void onDelete(report);}}>{deletingId===report.id?"Đang xóa…":"Xóa"}</button>}</div></td>
+        <td>{index+1}</td>{dailyReportFields.map(([key])=><td key={String(key)}>{displayValue(report,key)}</td>)}
+      </tr>)}{!reports.length&&<tr><td colSpan={dailyReportFields.length+2}><div className="empty big"><b>Chưa có báo cáo trong tháng này</b><span>Các báo cáo bạn nhập sẽ được lưu và hiển thị tại đây.</span></div></td></tr>}</tbody>
+    </table></div>
+  </section>;
 }
 
 function PurchaseHistoryView({summary,month,onMonth,onImport,onExport,onDelete,canManage,busy}:{summary:PurchaseHistorySummary;month:string;onMonth:(value:string)=>void;onImport:()=>void;onExport:(month:string)=>void;onDelete:(month:string)=>void;canManage:boolean;busy:boolean}) {
