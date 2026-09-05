@@ -40,7 +40,7 @@ npm run build
 echo "🚀 [4/4] Restart server..."
 # Nếu dùng PM2 (khuyến nghị):
 if command -v pm2 &> /dev/null; then
-  pm2 restart pog || pm2 start "npm start" --name pog
+  pm2 restart pog --update-env || pm2 start "npm start" --name pog
   echo "✅ Server đã restart qua PM2!"
 else
   echo "⚠️  PM2 chưa cài. Chạy thủ công: npm start"
