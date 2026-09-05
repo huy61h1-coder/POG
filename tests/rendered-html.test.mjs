@@ -92,7 +92,7 @@ try{
   const [page,health]=await Promise.all([fetch(origin+"/"),fetch(origin+"/healthz")]);
   assert.equal(page.status,200);
   assert.match(page.headers.get("content-type")||"",/^text\/html/);
-  assert.deepEqual(await health.json(),{ok:true,storage:"local-json",customerStorage:"local-json",customerImportReader:"bounded-xlsx-v1"});
+  assert.deepEqual(await health.json(),{ok:true,storage:"local-json",customerStorage:"local-json",purchaseHistoryStorage:"local-json",customerImportReader:"bounded-xlsx-v1"});
 
   const anonymous=await fetch(origin+"/api/store");
   assert.equal(anonymous.status,200);

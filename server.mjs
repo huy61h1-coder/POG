@@ -12,6 +12,7 @@ import { strToU8, zipSync } from "fflate";
 import { normalizeImageUrl, normalizeMasterProduct } from "./lib/master-data.mjs";
 import { DAILY_REPORT_COLUMNS, parseCustomerRows, customerFieldsFromReport } from "./lib/customer-data.mjs";
 import { readCustomerWorkbookSheets } from "./lib/customer-workbook.mjs";
+import { parsePurchaseRows } from "./lib/purchase-history.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
@@ -52,7 +53,7 @@ function initialState() {
       { id:"p2",sku:"10763049",barcode:"45497410763049",supplierBarcode:"45497410763049",name:"HC GỐI MOCHI PILLOW BE",division:"12",divisionName:"HOME & LIVING",department:"1201",departmentName:"HOME COORDY",line:"12",lineName:"HOUSEHOLD",side:"B",bay:2,price:185000,stock:45,loss:2,expDate:"2026-06-15",updatedAt:now },
       { id:"p3",sku:"8969583",barcode:"8801260418800",supplierBarcode:"8801260418800",name:"BVS SOONSOOHANMYEON 23CM 18 MIẾNG",division:"10",divisionName:"HEALTH & BEAUTY",department:"1002",departmentName:"FEMININE CARE",line:"16",lineName:"NONFOOD",side:"A",bay:5,price:45000,stock:0,loss:0,expDate:"2027-01-10",updatedAt:now },
     ],
-    accounts: [], sessions: [], roles: [], logs: [], picking: [], orderHistory: [], customers: [], dailyReports: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
+    accounts: [], sessions: [], roles: [], logs: [], picking: [], orderHistory: [], customers: [], dailyReports: [], purchaseHistory: [], pogFiles: [], stockRecords: [], manualChecks: [], stockImport: null,
     // Keep the legacy logoSize field as a desktop alias for older clients,
     // while storing independent desktop/mobile sizes for the responsive UI.
     appBrand: { logo:"/aeon-logo.svg", logoSize:220, logoSizeDesktop:220, logoSizeMobile:120, updatedAt:now },
@@ -114,9 +115,15 @@ async function readCustomerWorkbook(source) {
   candidates.sort((left,right)=>right.records.length-left.records.length);
   return candidates[0];
 }
+async function readPurchaseWorkbook(source,period){
+  const sheets=await readCustomerWorkbookSheets(source),candidates=[];
+  for(const sheet of Array.isArray(sheets)?sheets:[]){try{const parsed=parsePurchaseRows(sheet.data,{period});candidates.push({sheetName:asText(sheet.sheet),...parsed});}catch{/* Ignore cover/template sheets. */}}
+  if(!candidates.length)throw new Error("File Excel lịch sử mua hàng không có sheet chứa cột SĐT hợp lệ.");
+  candidates.sort((left,right)=>right.records.length-left.records.length);return candidates[0];
+}
 const customerStorageFields=["name","status","vatExport","memberCard","group","companyName","email","taxId","vatAddress","deliveryAddress"];
 const customerStorageColumns=["name","status","vat_export","member_card","group_name","company_name","email","tax_id","vat_address","delivery_address"];
-let customerStorageCache=null,customerStorageCacheAt=0,customerStorageReady=false;
+let customerStorageCache=null,customerStorageCacheAt=0,customerStorageReady=false,purchaseStorageReady=false;
 function invalidateCustomerStorageCache(){customerStorageCache=null;customerStorageCacheAt=0;}
 function normalizedCustomerRecord(source,now=Date.now()) {
   const fields=customerFieldsFromReport(source||{});
@@ -166,6 +173,27 @@ async function upsertPersistentCustomers(sources) {
   invalidateCustomerStorageCache();const customers=await readPersistentCustomers(),total=customers.length;
   return {created,updated,total,customers};
 }
+function purchaseFromStorageRow(row){return {id:asText(row.source_key),period:asText(row.period),phone:normalizePhone(row.phone),customerName:asText(row.customer_name),address:asText(row.address),date:asText(row.purchase_date),invoiceNumber:asText(row.invoice_number),invoiceValue:Number(row.invoice_value)||0,products:asText(row.products),sourceName:asText(row.source_name),sourceRow:asInt(row.source_row),updatedAt:asInt(row.updated_at,Date.now())};}
+function purchaseRecordKey(record){return [asText(record.period),normalizePhone(record.phone),asText(record.date),asText(record.invoiceNumber),asInt(record.rowNumber,record.sourceRow)].join("|").slice(0,500);}
+async function readPersistentPurchaseHistory(fallback=[]){
+  if(!pool||!purchaseStorageReady)return fallback;
+  const result=await pool.query("SELECT source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at FROM fulfillment_purchase_history ORDER BY purchase_date DESC, source_row ASC");
+  return result.rows.map(purchaseFromStorageRow);
+}
+async function upsertPersistentPurchaseHistory(records,sourceName){
+  if(!pool||!purchaseStorageReady)throw new Error("Kho lịch sử mua hàng PostgreSQL chưa sẵn sàng.");
+  const rows=(Array.isArray(records)?records:[]).map((record)=>{const period=asText(record.period),phone=normalizePhone(record.phone),date=asText(record.date),invoice=asText(record.invoiceNumber),sourceRow=asInt(record.rowNumber,record.sourceRow);return {sourceKey:purchaseRecordKey({...record,period,phone,date,invoiceNumber:invoice,sourceRow}),period,phone,customerName:asText(record.customerName).slice(0,4000),address:asText(record.address).slice(0,4000),date,invoiceNumber:invoice.slice(0,200),invoiceValue:Number(record.invoiceValue)||0,products:asText(record.products).slice(0,4000),sourceName:asText(sourceName).slice(0,300),sourceRow};}).filter((record)=>record.period&&record.phone.length>=8);
+  const byKey=new Map(rows.map((record)=>[record.sourceKey,record]));const unique=[...byKey.values()],client=await pool.connect();let created=0,updated=0;
+  try { await client.query("BEGIN"); for(let start=0;start<unique.length;start+=250){const batch=unique.slice(start,start+250),values=[],tuples=batch.map((record,index)=>{const offset=index*12+1;values.push(record.sourceKey,record.period,record.phone,record.customerName,record.address,record.date,record.invoiceNumber,record.invoiceValue,record.products,record.sourceName,record.sourceRow,Date.now());return "("+Array.from({length:12},(_,item)=>"$"+(offset+item)).join(",")+")";});const existing=await client.query("SELECT source_key FROM fulfillment_purchase_history WHERE source_key=ANY($1::text[])",[batch.map((record)=>record.sourceKey)]);const existingKeys=new Set(existing.rows.map((row)=>row.source_key));for(const record of batch){if(existingKeys.has(record.sourceKey))updated++;else created++;}await client.query(`INSERT INTO fulfillment_purchase_history (source_key,period,phone,customer_name,address,purchase_date,invoice_number,invoice_value,products,source_name,source_row,updated_at) VALUES ${tuples.join(",")} ON CONFLICT (source_key) DO UPDATE SET period=EXCLUDED.period,phone=EXCLUDED.phone,customer_name=EXCLUDED.customer_name,address=EXCLUDED.address,purchase_date=EXCLUDED.purchase_date,invoice_number=EXCLUDED.invoice_number,invoice_value=EXCLUDED.invoice_value,products=EXCLUDED.products,source_name=EXCLUDED.source_name,source_row=EXCLUDED.source_row,updated_at=EXCLUDED.updated_at`,values); } await client.query("COMMIT"); } catch(error){await client.query("ROLLBACK").catch(()=>undefined);throw error;} finally {client.release();}
+  return {created,updated,imported:unique.length};
+}
+function purchaseSummary(records,month){
+  const selectedMonth=/^\d{4}-\d{2}$/.test(asText(month))?asText(month):localDateKey().slice(0,7),year=selectedMonth.slice(0,4),yearRows=records.filter((record)=>record.period.startsWith(year)),monthRows=yearRows.filter((record)=>record.period===selectedMonth),groups=new Map();
+  for(const record of yearRows){const key=normalizePhone(record.phone)||`${normalizeText(record.customerName)}|${normalizeText(record.address)}`;const current=groups.get(key)||{phone:record.phone,customerName:record.customerName,address:record.address,yearTotal:0,monthTotal:0,monthlyTotals:{},orders:0};current.phone=current.phone||record.phone;current.customerName=current.customerName||record.customerName;current.address=current.address||record.address;current.yearTotal+=Number(record.invoiceValue)||0;current.monthlyTotals[record.period]=(current.monthlyTotals[record.period]||0)+(Number(record.invoiceValue)||0);if(record.period===selectedMonth)current.monthTotal+=Number(record.invoiceValue)||0;current.orders++;groups.set(key,current);}
+  const customers=[...groups.values()].sort((left,right)=>right.monthTotal-left.monthTotal||right.yearTotal-left.yearTotal||left.customerName.localeCompare(right.customerName,"vi"));
+  return {month:selectedMonth,year,records:monthRows,customers,totals:{monthValue:monthRows.reduce((sum,row)=>sum+(Number(row.invoiceValue)||0),0),yearValue:yearRows.reduce((sum,row)=>sum+(Number(row.invoiceValue)||0),0),monthOrders:monthRows.length,yearOrders:yearRows.length,customerCount:customers.length}};
+}
+function normalizedPurchaseRecord(record,period,sourceName){const normalized={period,phone:normalizePhone(record.phone),customerName:asText(record.customerName),address:asText(record.address),date:asText(record.date)||`${period}-01`,invoiceNumber:asText(record.invoiceNumber),invoiceValue:Number(record.invoiceValue)||0,products:asText(record.products),sourceName:asText(sourceName),sourceRow:asInt(record.rowNumber)};return {...normalized,id:purchaseRecordKey(normalized),updatedAt:Date.now()};}
 const defaultLineNames = new Map(lineDefaults.map(([line,name]) => [line,name.toUpperCase()]));
 function ensureStateShape(source) {
   const state=source&&typeof source==="object"?source:initialState();
@@ -178,6 +206,7 @@ function ensureStateShape(source) {
   state.orderHistory=Array.isArray(state.orderHistory)?state.orderHistory:[];
   state.customers=Array.isArray(state.customers)?state.customers.filter((item)=>asText(item?.phone)).map((item)=>({id:asText(item.id)||randomUUID(),phone:normalizePhone(item.phone),name:asText(item.name),status:asText(item.status),vatExport:asText(item.vatExport),memberCard:asText(item.memberCard),group:asText(item.group),companyName:asText(item.companyName),email:asText(item.email),taxId:asText(item.taxId),vatAddress:asText(item.vatAddress),deliveryAddress:asText(item.deliveryAddress),createdAt:asInt(item.createdAt,Date.now()),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.dailyReports=Array.isArray(state.dailyReports)?state.dailyReports.filter((item)=>asText(item?.id)).map((item)=>({id:asText(item.id),...Object.fromEntries(DAILY_REPORT_COLUMNS.map(([key])=>[key,asText(item[key])])),invoiceValue:Number(item.invoiceValue)||0,remainingInvoiceValue:Number(item.remainingInvoiceValue)||0,createdAt:asInt(item.createdAt,Date.now()),updatedAt:asInt(item.updatedAt,Date.now()),createdBy:asText(item.createdBy)})):[];
+  state.purchaseHistory=Array.isArray(state.purchaseHistory)?state.purchaseHistory.filter((item)=>asText(item?.period)&&asText(item?.phone)).map((item)=>({id:asText(item.id)||randomUUID(),period:asText(item.period),phone:normalizePhone(item.phone),customerName:asText(item.customerName),address:asText(item.address),date:asText(item.date),invoiceNumber:asText(item.invoiceNumber),invoiceValue:Number(item.invoiceValue)||0,products:asText(item.products),sourceName:asText(item.sourceName),sourceRow:asInt(item.sourceRow),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   state.pogFiles=Array.isArray(state.pogFiles)?state.pogFiles:[];
   state.stockRecords=Array.isArray(state.stockRecords)?state.stockRecords.filter((item)=>asText(item?.sku)).map((item)=>({sku:asText(item.sku),name:asText(item.name),division:asText(item.division),divisionName:asText(item.divisionName),department:asText(item.department),departmentName:asText(item.departmentName),stock:Math.max(0,asInt(item.stock)),sales:Math.max(0,asInt(item.sales)),updatedAt:asInt(item.updatedAt,Date.now())})):[];
   const validCheckDate=(value)=>/^\d{4}-\d{2}-\d{2}$/.test(asText(value))?asText(value):"";
@@ -529,6 +558,13 @@ class StateStore {
         customerStorageReady=false;
         console.warn("Customer master table is unavailable; using durable fulfillment_state fallback:",error instanceof Error?error.message:error);
       }
+      try {
+        await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_purchase_history (source_key TEXT PRIMARY KEY, period TEXT NOT NULL, phone TEXT NOT NULL, customer_name TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '', purchase_date TEXT NOT NULL, invoice_number TEXT NOT NULL DEFAULT '', invoice_value NUMERIC NOT NULL DEFAULT 0, products TEXT NOT NULL DEFAULT '', source_name TEXT NOT NULL DEFAULT '', source_row INTEGER NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL)");
+        purchaseStorageReady=true;
+      } catch(error) {
+        purchaseStorageReady=false;
+        console.warn("Purchase history table is unavailable; using durable fulfillment_state fallback:",error instanceof Error?error.message:error);
+      }
     } else {
       mkdirSync(path.dirname(statePath), { recursive: true });
       if (!existsSync(statePath)){
@@ -557,7 +593,7 @@ class StateStore {
     // Keep one normalized in-memory snapshot for short read bursts (typing in
     // search, opening POG, switching filters). Mutations refresh it immediately,
     // so a longer TTL avoids reparsing the full Master Data JSON on every key.
-    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
+    if (pool) { if(this.remoteState&&Date.now()-this.remoteStateAt<30_000)return this.remoteState;const fresh=ensureStateShape((await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE")).rows[0].state);if(customerStorageReady)fresh.customers=await readPersistentCustomers(fresh.customers);if(purchaseStorageReady)fresh.purchaseHistory=await readPersistentPurchaseHistory(fresh.purchaseHistory);this.remoteState=fresh;this.remoteStateAt=Date.now();return fresh; }
     if(!this.localState){
       try { this.localState=ensureStateShape(JSON.parse(await fs.readFile(statePath, "utf8"))); }
       catch(error){
@@ -601,6 +637,9 @@ class StateStore {
   replaceCustomers(customers) {
     if(this.remoteState)this.remoteState.customers=(Array.isArray(customers)?customers:[]).map((customer)=>({...customer}));
   }
+  replacePurchaseHistory(records) {
+    if(this.remoteState)this.remoteState.purchaseHistory=(Array.isArray(records)?records:[]).map((record)=>({...record}));
+  }
 }
 
 const store = new StateStore();
@@ -625,6 +664,7 @@ app.get("/healthz", (_req,res) => res.json({
   ok:true,
   storage:pool?"postgres":"local-json",
   customerStorage:pool?(customerStorageReady?"postgres":"state-fallback"):"local-json",
+  purchaseHistoryStorage:pool?(purchaseStorageReady?"postgres":"state-fallback"):"local-json",
   customerImportReader:"bounded-xlsx-v1",
 }));
 
@@ -962,6 +1002,33 @@ app.get("/api/daily-reports",async(req,res,next)=>{
     const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7);
     const reports=state.dailyReports.filter((report)=>asText(report.date).startsWith(month)).sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.createdAt).localeCompare(String(a.createdAt)));
     res.set("Cache-Control","no-store").json({reports,customers:state.customers,month});
+  } catch(error){next(error);}
+});
+
+app.get("/api/purchase-history",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory):state.purchaseHistory;
+    res.set("Cache-Control","no-store").json({...purchaseSummary(records,month),storage:purchaseStorageReady?"postgres":"state"});
+  } catch(error){next(error);}
+});
+
+app.get("/api/purchase-history/export.xlsx",async(req,res,next)=>{
+  try {
+    const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    const month=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):localDateKey().slice(0,7),records=purchaseStorageReady?await readPersistentPurchaseHistory(state.purchaseHistory):state.purchaseHistory,summary=purchaseSummary(records,month),rows=[["SĐT","TÊN KHÁCH HÀNG","ĐỊA CHỈ","TỔNG THÁNG "+month,"TỔNG NĂM "+summary.year,"SỐ ĐƠN TRONG NĂM",...Array.from({length:12},(_,index)=>`${summary.year}-${String(index+1).padStart(2,"0")}`)],...summary.customers.map((customer)=>[customer.phone,customer.customerName,customer.address,customer.monthTotal,customer.yearTotal,customer.orders,...Array.from({length:12},(_,index)=>customer.monthlyTotals[`${summary.year}-${String(index+1).padStart(2,"0")}`]||0)])];
+    const workbook=createXlsx(rows),filename=`Lich_su_mua_hang_${month}.xlsx`;res.set({"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}"`,"Cache-Control":"no-store"}).send(Buffer.from(workbook));
+  } catch(error){next(error);}
+});
+
+app.post("/api/purchase-history/import",requireManager,upload.single("file"),async(req,res,next)=>{
+  if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel lịch sử mua hàng .xlsx"});
+  if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
+  const period=/^\d{4}-\d{2}$/.test(asText(req.body?.period))?asText(req.body.period):"";
+  try {
+    const parsed=await readPurchaseWorkbook(req.file.buffer,period),records=parsed.records.map((record)=>normalizedPurchaseRecord(record,period,req.file.originalname));
+    if(purchaseStorageReady){const persisted=await upsertPersistentPurchaseHistory(records,req.file.originalname),state=await store.read(),all=await readPersistentPurchaseHistory(state.purchaseHistory);store.replacePurchaseHistory(all);return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created:persisted.created,updated:persisted.updated,imported:persisted.imported,skipped:parsed.skipped,total:all.length,storage:"postgres"});}
+    const result=await store.mutate((state)=>{const actor=actorFrom(req,state),current=new Map(state.purchaseHistory.map((item)=>[item.id,item]));let created=0,updated=0;for(const record of records){if(current.has(record.id))updated++;else created++;current.set(record.id,record);}state.purchaseHistory=[...current.values()].sort((left,right)=>String(right.date).localeCompare(String(left.date)));audit(state,actor,"Nhập lịch sử mua hàng "+period+": "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,period,created,updated,imported:records.length,skipped:parsed.skipped,total:state.purchaseHistory.length,storage:"state"};});res.status(result.status||200).json(result);
   } catch(error){next(error);}
 });
 
