@@ -11,7 +11,7 @@ import { Worker } from "node:worker_threads";
 import { strToU8, zipSync } from "fflate";
 import { normalizeImageUrl, normalizeMasterProduct } from "./lib/master-data.mjs";
 import { DAILY_REPORT_COLUMNS, parseCustomerRows, customerFieldsFromReport } from "./lib/customer-data.mjs";
-import readExcelFile from "read-excel-file/node";
+import { readCustomerWorkbookSheets } from "./lib/customer-workbook.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production") || process.env.NODE_ENV === "production";
@@ -102,7 +102,7 @@ function normalizeOrderDate(value,fallback=Date.now()) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text)?text:localDateKey(fallback);
 }
 async function readCustomerWorkbook(source) {
-  const sheets=await readExcelFile(source);
+  const sheets=await readCustomerWorkbookSheets(source);
   const candidates=[];
   for(const sheet of Array.isArray(sheets)?sheets:[]){
     try {
@@ -1146,9 +1146,10 @@ app.post("/api/customers/import", requireManager, upload.single("file"), async (
       const persisted=await upsertPersistentCustomers(parsed.records);
       store.replaceCustomers(persisted.customers);
       console.info("Imported customer master directly to PostgreSQL:",parsed.sheetName,persisted.created,"new",persisted.updated,"updated");
-      return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created:persisted.created,updated:persisted.updated,imported:parsed.records.length,skipped:parsed.skipped,total:persisted.total,storage:"postgres"});
+      const imported=persisted.created+persisted.updated,skipped=parsed.skipped+Math.max(0,parsed.records.length-imported);
+      return res.json({ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created:persisted.created,updated:persisted.updated,imported,skipped,total:persisted.total,storage:"postgres"});
     }
-    const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}audit(state,actor,"Nhập Master Data khách hàng ("+(parsed.sheetName||"sheet")+"): "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created,updated,imported:parsed.records.length,skipped:parsed.skipped,total:state.customers.length};});
+    const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}const imported=created+updated,skipped=parsed.skipped+Math.max(0,parsed.records.length-imported);audit(state,actor,"Nhập Master Data khách hàng ("+(parsed.sheetName||"sheet")+"): "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created,updated,imported,skipped,total:state.customers.length};});
     res.status(result.status||200).json(result);
   }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}
 });
