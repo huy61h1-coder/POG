@@ -101,8 +101,8 @@ function normalizeOrderDate(value,fallback=Date.now()) {
   const text=asText(value);
   return /^\d{4}-\d{2}-\d{2}$/.test(text)?text:localDateKey(fallback);
 }
-async function readCustomerWorkbook(filePath) {
-  const sheets=await readExcelFile(filePath);
+async function readCustomerWorkbook(source) {
+  const sheets=await readExcelFile(source);
   const candidates=[];
   for(const sheet of Array.isArray(sheets)?sheets:[]){
     try {
@@ -1075,12 +1075,11 @@ app.post("/api/store", async (req, res, next) => {
 app.post("/api/customers/import", requireManager, upload.single("file"), async (req,res)=>{
   if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel khách hàng .xlsx"});
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
-  const tempPath=path.join(dataDir,"customer-import-"+randomUUID()+".xlsx");
   try {
-    await fs.writeFile(tempPath,req.file.buffer);const parsed=await readCustomerWorkbook(tempPath);
+    const parsed=await readCustomerWorkbook(req.file.buffer);
     const result=await store.mutate((state)=>{const actor=actorFrom(req,state);if(!actor||!canManage(actor.role))return {error:"Cần quyền Manager hoặc Admin",status:403};let created=0,updated=0;for(const source of parsed.records){const report={...source},fields=customerFieldsFromReport(report),phone=normalizePhone(fields.phone);if(phone.replace(/\D/g,"").length<8)continue;const existing=state.customers.find((customer)=>normalizePhone(customer.phone)===phone);if(existing){for(const [key,value] of Object.entries(fields))if(value)existing[key]=value;existing.updatedAt=Date.now();updated++;}else {state.customers.push({id:randomUUID(),...fields,createdAt:Date.now(),updatedAt:Date.now()});created++;}}audit(state,actor,"Nhập Master Data khách hàng ("+(parsed.sheetName||"sheet")+"): "+created+" mới, "+updated+" cập nhật");return {ok:true,fileName:req.file.originalname,sheetName:parsed.sheetName,created,updated,imported:parsed.records.length,skipped:parsed.skipped,total:state.customers.length};});
     res.status(result.status||200).json(result);
-  }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}finally{await fs.unlink(tempPath).catch(()=>undefined);}
+  }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}
 });
 
 app.post("/api/master-data/import", requireManager, requireImportCapacity, masterUpload.single("file"), async (req, res, next) => {
