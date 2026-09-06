@@ -232,9 +232,21 @@ async function persistDailyReportFast(report,actorName){
 async function readPersistentDailyReports(month){
   const result=await pool.query(`SELECT id,${dailyReportDbColumns.join(",")},created_at,updated_at,created_by FROM fulfillment_daily_reports WHERE date LIKE $1 ORDER BY date DESC,created_at DESC`,[asText(month)+"%"]);return result.rows.map(dailyReportFromStorageRow);
 }
-async function deletePersistentDailyReport(id){
-  const result=await pool.query("DELETE FROM fulfillment_daily_reports WHERE id=$1 RETURNING id,customer_name",[id]);
-  return result.rows[0]||null;
+async function deletePersistentDailyReport(id,actor){
+  const client=await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result=await client.query("DELETE FROM fulfillment_daily_reports WHERE id=$1 RETURNING id,customer_name",[id]);
+    if(!result.rows[0]){await client.query("ROLLBACK");return null;}
+    const stateResult=await client.query("SELECT state FROM fulfillment_state WHERE id=TRUE FOR UPDATE");
+    if(!stateResult.rows[0])throw new Error("Không tìm thấy kho trạng thái hệ thống");
+    const state=ensureStateShape(stateResult.rows[0].state);
+    audit(state,actor,"Xóa báo cáo ngày cho khách "+asText(result.rows[0].customer_name,"—"));
+    await client.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE",[JSON.stringify(state)]);
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch(error){await client.query("ROLLBACK").catch(()=>undefined);throw error;}
+  finally {client.release();}
 }
 function purchaseFromStorageRow(row){return {id:asText(row.source_key),period:asText(row.period),phone:normalizePhone(row.phone),customerName:asText(row.customer_name),address:asText(row.address),date:asText(row.purchase_date),invoiceNumber:asText(row.invoice_number),invoiceValue:Number(row.invoice_value)||0,products:asText(row.products),sourceName:asText(row.source_name),sourceRow:asInt(row.source_row),updatedAt:asInt(row.updated_at,Date.now())};}
 function normalizeLocalPurchaseRecords(records){return (Array.isArray(records)?records:[]).filter((item)=>asText(item?.period)&&normalizePhone(item?.phone)).map((item)=>({id:asText(item.id)||purchaseRecordKey(item),period:asText(item.period),phone:normalizePhone(item.phone),customerName:asText(item.customerName),address:asText(item.address),date:asText(item.date),invoiceNumber:asText(item.invoiceNumber),invoiceValue:Number(item.invoiceValue)||0,products:asText(item.products),sourceName:asText(item.sourceName),sourceRow:asInt(item.sourceRow),updatedAt:asInt(item.updatedAt,Date.now())}));}
@@ -1149,8 +1161,7 @@ app.delete("/api/daily-reports/:id",async(req,res,next)=>{
     if(!canManage(actor.role))return res.status(403).json({error:"Cần quyền Manager hoặc Admin để xóa báo cáo"});
     const id=asText(req.params.id);if(!id)return res.status(400).json({error:"Thiếu mã báo cáo"});
     if(dailyReportsStorageReady){
-      const deleted=await deletePersistentDailyReport(id);if(!deleted)return res.status(404).json({error:"Không tìm thấy báo cáo"});
-      await store.mutate(async(current)=>{audit(current,actor,"Xóa báo cáo ngày cho khách "+asText(deleted.customer_name,"—"));return {ok:true};});
+      const deleted=await deletePersistentDailyReport(id,actor);if(!deleted)return res.status(404).json({error:"Không tìm thấy báo cáo"});
       return res.json({ok:true,id});
     }
     const result=await store.mutate(async(current)=>{

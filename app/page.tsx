@@ -124,7 +124,7 @@ async function readApiJson<T>(response:Response):Promise<T> {
   }
 }
 async function fetchApi(input:RequestInfo|URL,init?:RequestInit):Promise<Response> {
-  const retryable=!init?.method||["GET","HEAD"].includes(init.method.toUpperCase());
+  const retryable=!init?.method||["GET","HEAD","DELETE"].includes(init.method.toUpperCase());
   let response=await fetch(input,init);
   if(!retryable||![502,503,504].includes(response.status))return response;
   for(const delay of [500,1200]){
@@ -999,7 +999,7 @@ function DailyReportHistoryView({reports:sourceReports,month,onEdit:_onEdit}:{re
     if(deletingId||!window.confirm(`Xóa báo cáo của ${report.customerName||"khách hàng này"} ngày ${report.date}? Dữ liệu đã xóa không thể khôi phục.`))return;
     setDeletingId(report.id);
     try {
-      const response=await fetch("/api/daily-reports/"+encodeURIComponent(report.id),{method:"DELETE"}),result=await readApiJson<{error?:string}>(response);
+      const response=await fetchApi("/api/daily-reports/"+encodeURIComponent(report.id),{method:"DELETE"}),result=await readApiJson<{error?:string}>(response);
       if(!response.ok)throw new Error(result.error||"Không thể xóa báo cáo ngày");
       setDeletedIds((current)=>new Set([...current,report.id]));
     } catch(cause) { window.alert(cause instanceof Error?cause.message:"Không thể xóa báo cáo ngày"); }
