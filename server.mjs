@@ -106,6 +106,34 @@ function asDecimal(value, fallback = 0) {
 }
 function cleanLine(value) { const digits=asText(value, "01").replace(/\D/g, ""); return (digits||"1").padStart(2, "0").slice(0, 3); }
 function canManage(role) { const normalized=String(role||"").toUpperCase(); return normalized === "ADMIN" || normalized === "MANAGER"; }
+const PERMISSION_DEFINITIONS = [
+  ["dashboard", "Tổng quan"], ["pog", "Sơ đồ POG"], ["products", "Sản phẩm"], ["stock", "Check Stock"],
+  ["loss", "Check Loss"], ["date", "Check Date"], ["orders", "Đơn soạn"], ["dailyReport", "Báo cáo ngày"],
+  ["suggest", "Gợi ý sản phẩm"], ["editProducts", "Sửa/xóa sản phẩm"], ["importData", "Nhập dữ liệu Excel"],
+  ["managePog", "Tải/sửa POG"], ["manageOrders", "Gán và quản lý đơn"], ["manageReports", "Nhập/sửa/xóa báo cáo"],
+  ["pickOrders", "Soạn hàng"], ["deliverOrders", "Giao hàng"], ["manageSettings", "Cài đặt & tài khoản"],
+];
+const PERMISSION_KEYS = PERMISSION_DEFINITIONS.map(([key]) => key);
+function defaultPermissions(role, workType="BOTH") {
+  const normalized=String(role||"").toUpperCase(), permissions=Object.fromEntries(PERMISSION_KEYS.map((key)=>[key,false]));
+  if(normalized==="ADMIN") return Object.fromEntries(PERMISSION_KEYS.map((key)=>[key,true]));
+  ["dashboard","pog","products","stock","loss","date","orders","dailyReport","suggest"].forEach((key)=>{permissions[key]=true;});
+  if(normalized==="MANAGER") ["editProducts","importData","managePog","manageOrders","manageReports","pickOrders","deliverOrders"].forEach((key)=>{permissions[key]=true;});
+  if(normalized==="STAFF") {
+    permissions.pickOrders=workType==="PICKING"||workType==="BOTH";
+    permissions.deliverOrders=workType==="DELIVERY"||workType==="BOTH";
+  }
+  return permissions;
+}
+function normalizePermissions(raw, role, workType="BOTH") {
+  const permissions=defaultPermissions(role,workType);
+  if(raw&&typeof raw==="object") for(const key of PERMISSION_KEYS) if(Object.prototype.hasOwnProperty.call(raw,key)) permissions[key]=raw[key]===true;
+  return permissions;
+}
+function hasPermission(actor, key) {
+  if(String(actor?.role||"").toUpperCase()==="ADMIN") return true;
+  return normalizePermissions(actor?.permissions,actor?.role,actor?.workType)[key]===true;
+}
 function normalizeText(value) { return asText(value).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[đĐ]/g,"d").toLowerCase(); }
 function normalizePhone(value) { return asText(value).replace(/[^\d+]/g,"").slice(0,24); }
 function localDateKey(value=Date.now()) {
@@ -295,7 +323,11 @@ const defaultLineNames = new Map(lineDefaults.map(([line,name]) => [line,name.to
 function ensureStateShape(source) {
   const state=source&&typeof source==="object"?source:initialState();
   state.products=(Array.isArray(state.products)?state.products:[]).map((product)=>normalizeMasterProduct(product,defaultLineNames.get(cleanLine(product?.line))||""));
-  state.accounts=Array.isArray(state.accounts)?state.accounts:[];
+  state.accounts=(Array.isArray(state.accounts)?state.accounts:[]).map((account)=>{
+    const role=["ADMIN","MANAGER","STAFF"].includes(String(account?.role||"").toUpperCase())?String(account.role).toUpperCase():"STAFF";
+    const workType=["PICKING","DELIVERY","BOTH"].includes(String(account?.workType||"").toUpperCase())?String(account.workType).toUpperCase():"BOTH";
+    return {...account,role,workType,permissions:normalizePermissions(account?.permissions,role,workType)};
+  });
   state.sessions=(Array.isArray(state.sessions)?state.sessions:[]).filter((session)=>Number(session.expiresAt)>Date.now());
   state.roles=Array.isArray(state.roles)?state.roles:[];
   state.logs=Array.isArray(state.logs)?state.logs:[];
@@ -336,7 +368,8 @@ async function verifyPassword(password,stored) {
   return expected.length===actual.length&&timingSafeEqual(expected,actual);
 }
 function publicAccount(account) {
-  return {userId:account.id,username:account.username,email:account.username,name:account.name,role:account.role,workType:["PICKING","DELIVERY","BOTH"].includes(account.workType)?account.workType:"BOTH",active:account.active!==false,createdAt:account.createdAt,updatedAt:account.updatedAt};
+  const workType=["PICKING","DELIVERY","BOTH"].includes(account.workType)?account.workType:"BOTH";
+  return {userId:account.id,username:account.username,email:account.username,name:account.name,role:account.role,workType,permissions:normalizePermissions(account.permissions,account.role,workType),active:account.active!==false,createdAt:account.createdAt,updatedAt:account.updatedAt};
 }
 function sessionCookie(sessionId,maxAge=sessionMaxAgeSeconds) {
   return "fulfillment_session="+encodeURIComponent(sessionId||"")+"; Path=/; HttpOnly; SameSite=Strict; Max-Age="+maxAge+(production?"; Secure":"");
@@ -803,7 +836,10 @@ function actorFrom(req, state) {
   // Các request ghi dữ liệu vẫn không có actor và tiếp tục bị bảo vệ.
   if(!session)return ["GET","HEAD"].includes(req.method)?guestActor:null;
   const account=state.accounts.find((item)=>item.id===session.accountId&&item.active!==false);
-  return account?publicAccount(account):null;
+  if(!account)return null;
+  const exposed=publicAccount(account);
+  if(req.permissionOverride&&account.role==="STAFF"&&hasPermission(exposed,req.permissionOverride))exposed.role="MANAGER";
+  return exposed;
 }
 
 async function requireManager(req,res,next) {
@@ -814,6 +850,16 @@ async function requireManager(req,res,next) {
     req.fulfillmentActor=actor;
     next();
   } catch(error){next(error);}
+}
+function requirePermissionMiddleware(permission,label) {
+  return async(req,res,next)=>{
+    try {
+      const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);
+      if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+      if(!hasPermission(actor,permission))return res.status(403).json({error:"Tài khoản không có quyền: "+(label||permission)});
+      req.fulfillmentActor=actor;req.permissionOverride=permission;next();
+    } catch(error){next(error);}
+  };
 }
 
 const importIdPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -882,7 +928,7 @@ async function runStockJob(job) {
   try {
     updateMasterJob(job,{status:"processing",phase:"Đang khởi động bộ xử lý tồn kho",percent:8});await runStockWorker(job,resultPath);
     const result=await store.mutate(async(state)=>{
-      const account=state.accounts.find((item)=>item.id===job.ownerId&&item.active!==false);if(!account||!canManage(account.role))throw new Error("Tài khoản không còn quyền cập nhật Stock");
+      const account=state.accounts.find((item)=>item.id===job.ownerId&&item.active!==false);if(!account||!hasPermission(publicAccount(account),"importData"))throw new Error("Tài khoản không còn quyền cập nhật Stock");
       const reader=createInterface({input:createReadStream(resultPath,{encoding:"utf8"}),crlfDelay:Infinity});let metadata=null,records=[],processed=0;
       for await(const line of reader){if(!line)continue;if(!metadata){metadata=JSON.parse(line);continue;}records.push({...JSON.parse(line),updatedAt:Date.now()});processed++;if(processed%5000===0){updateMasterJob(job,{phase:"Đang lưu danh sách tồn kho",percent:82,processedRows:processed,totalRows:job.totalRows||processed});await yieldToServer();}}
       if(!metadata)throw new Error("Không tìm thấy kết quả file Stock");state.stockRecords=records;state.stockImport={fileName:job.fileName,updatedAt:Date.now(),recordCount:records.length,skipped:metadata.skipped};audit(state,publicAccount(account),"Nhập file Stock: "+records.length+" SKU");
@@ -929,7 +975,7 @@ async function runMasterJob(job) {
     updateMasterJob(job,{status:"processing",phase:"Đang hợp nhất Master Data",percent:70});
     const result=await store.mutate(async(state)=>{
       const account=state.accounts.find((item)=>item.id===job.ownerId&&item.active!==false);
-      if(!account||!canManage(account.role))throw new Error("Tài khoản không còn quyền cập nhật Master Data");
+      if(!account||!hasPermission(publicAccount(account),"importData"))throw new Error("Tài khoản không còn quyền cập nhật Master Data");
       const actor=publicAccount(account),merged=await mergeMasterResultFile(state.products,resultPath,job),parsed=merged.metadata;
       updateMasterJob(job,{phase:"Đang lưu dữ liệu sản phẩm",percent:88});state.products=merged.products;
       audit(state,actor,"Nhập Excel Master Data: "+merged.created+" mới, "+merged.updated+" cập nhật, "+parsed.skipped+" bỏ qua");
@@ -1138,6 +1184,7 @@ app.get("/api/daily-reports",async(req,res,next)=>{
 app.post("/api/daily-reports",async(req,res,next)=>{
   try {
     const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+    if(!hasPermission(actor,"manageReports"))return res.status(403).json({error:"Tài khoản không có quyền: Nhập/sửa/xóa báo cáo"});
     const normalized=normalizedDailyReportInput(req.body?.report);if(normalized.error)return res.status(400).json({error:normalized.error});
     if(dailyReportsStorageReady){
       const persisted=await persistDailyReportFast(normalized.report,actor.name);
@@ -1158,7 +1205,7 @@ app.post("/api/daily-reports",async(req,res,next)=>{
 app.delete("/api/daily-reports/:id",async(req,res,next)=>{
   try {
     const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
-    if(!canManage(actor.role))return res.status(403).json({error:"Cần quyền Manager hoặc Admin để xóa báo cáo"});
+    if(!hasPermission(actor,"manageReports"))return res.status(403).json({error:"Tài khoản không có quyền: Nhập/sửa/xóa báo cáo"});
     const id=asText(req.params.id);if(!id)return res.status(400).json({error:"Thiếu mã báo cáo"});
     if(dailyReportsStorageReady){
       const deleted=await deletePersistentDailyReport(id,actor);if(!deleted)return res.status(404).json({error:"Không tìm thấy báo cáo"});
@@ -1188,7 +1235,7 @@ app.get("/api/purchase-history/export.xlsx",async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
-app.delete("/api/purchase-history",requireManager,async(req,res,next)=>{
+app.delete("/api/purchase-history",requirePermissionMiddleware("manageReports","Nhập/sửa/xóa báo cáo"),async(req,res,next)=>{
   const period=/^\d{4}-\d{2}$/.test(asText(req.query.month))?asText(req.query.month):"";
     if(!period)return res.status(400).json({error:"Tháng cần xóa không hợp lệ."});
   try {
@@ -1203,7 +1250,7 @@ app.delete("/api/purchase-history",requireManager,async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
-app.post("/api/purchase-history/import",requireManager,upload.single("file"),async(req,res,next)=>{
+app.post("/api/purchase-history/import",requirePermissionMiddleware("manageReports","Nhập/sửa/xóa báo cáo"),upload.single("file"),async(req,res,next)=>{
   if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel lịch sử mua hàng .xlsx"});
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
   const period=/^\d{4}-\d{2}$/.test(asText(req.body?.period))?asText(req.body.period):"";
@@ -1264,6 +1311,7 @@ app.post("/api/store", async (req, res, next) => {
     // the compact report table so it is just as fast as /api/daily-reports.
     if(asText(req.body?.action)==="upsertDailyReport"&&dailyReportsStorageReady){
       const state=await store.read({includeSidecars:false}),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});
+      if(!hasPermission(actor,"manageReports"))return res.status(403).json({error:"Tài khoản không có quyền: Nhập/sửa/xóa báo cáo"});
       const normalized=normalizedDailyReportInput(req.body?.report);if(normalized.error)return res.status(400).json({error:normalized.error});
       const persisted=await persistDailyReportFast(normalized.report,actor.name);
       return res.json({ok:true,report:persisted.report,customer:persisted.customer,storage:"postgres"});
@@ -1272,6 +1320,13 @@ app.post("/api/store", async (req, res, next) => {
       const actor = actorFrom(req, state), body = req.body || {}, action = asText(body.action);
       const fail = (error, status = 400) => ({ error, status });
       if(!actor)return fail("Vui lòng đăng nhập",401);
+      const requirePermission=(permission,label)=>hasPermission(actor,permission)?null:fail(`Tài khoản không có quyền: ${label||permission}`,403);
+      const actionPermissions={createAccount:["manageSettings","Cài đặt & tài khoản"],updateAccount:["manageSettings","Cài đặt & tài khoản"],assignPick:["manageOrders","Gán và quản lý đơn"],reassignOrder:["manageOrders","Gán và quản lý đơn"],completePickingOrder:["pickOrders","Soạn hàng"],assignDeliveryOrder:["manageOrders","Gán và quản lý đơn"],completeDeliveryOrder:["deliverOrders","Giao hàng"],reopenDeliveredOrder:["manageOrders","Gán và quản lý đơn"],addPick:["pickOrders","Soạn hàng"],updatePickQuantity:["pickOrders","Soạn hàng"],togglePick:["pickOrders","Soạn hàng"],updatePickedQuantity:["pickOrders","Soạn hàng"],markPickAvailability:["pickOrders","Soạn hàng"],removePick:["pickOrders","Soạn hàng"],clearPick:["pickOrders","Soạn hàng"],updateLineConfig:["managePog","Tải/sửa POG"],updatePogPage:["managePog","Tải/sửa POG"],updateAppBrand:["manageSettings","Cài đặt & tài khoản"]};
+      const actionPermission=actionPermissions[action];if(actionPermission){const denied=requirePermission(actionPermission[0],actionPermission[1]);if(denied)return denied;if(actor.role==="STAFF")actor.role="MANAGER";}
+      if(action==="setManualCheck"){
+        const manualPermission=body.kind==="checkDate"?"date":body.kind==="checkLoss"?"loss":body.kind==="expiry"?"date":"stock";
+        const denied=requirePermission(manualPermission,manualPermission==="date"?"Check Date":manualPermission==="loss"?"Check Loss":"Check Stock");if(denied)return denied;
+      }
       if(action==="createAccount"){
         if(actor.role!=="ADMIN")return fail("Chỉ Admin được tạo tài khoản",403);
         const source=body.account||{},username=normalizeUsername(source.username),name=asText(source.name),password=typeof source.password==="string"?source.password:"",role=asText(source.role,"STAFF"),workType=asText(source.workType,"BOTH"),validation=validateAccountInput({username,name,password});
@@ -1279,7 +1334,7 @@ app.post("/api/store", async (req, res, next) => {
         if(!["ADMIN","MANAGER","STAFF"].includes(role))return fail("Quyền tài khoản không hợp lệ");
         if(!["PICKING","DELIVERY","BOTH"].includes(workType))return fail("Loại nghiệp vụ không hợp lệ");
         if(state.accounts.some((account)=>account.username===username))return fail("Tên đăng nhập đã tồn tại");
-        const now=Date.now(),account={id:randomUUID(),username,name,role,workType,active:true,passwordHash:await hashPassword(password),createdAt:now,updatedAt:now};
+        const now=Date.now(),account={id:randomUUID(),username,name,role,workType,permissions:normalizePermissions(source.permissions,role,workType),active:true,passwordHash:await hashPassword(password),createdAt:now,updatedAt:now};
         state.accounts.push(account);audit(state,actor,"Tạo tài khoản "+username+" với quyền "+role);return {ok:true,account:publicAccount(account)};
       }
       if(action==="updateAccount"){
@@ -1295,7 +1350,11 @@ app.post("/api/store", async (req, res, next) => {
         const activeAdmins=state.accounts.filter((item)=>item.active!==false&&item.role==="ADMIN").length;
         if(account.role==="ADMIN"&&account.active!==false&&(role!=="ADMIN"||!active)&&activeAdmins<=1)return fail("Hệ thống phải còn ít nhất một Admin");
         if(password&&(password.length<8||password.length>128))return fail("Mật khẩu mới cần từ 8 đến 128 ký tự");
-        account.name=name;account.role=role;account.workType=workType;account.active=active;account.updatedAt=Date.now();
+        const previousRole=account.role,previousWorkType=account.workType;
+        account.name=name;account.role=role;account.workType=workType;
+        if(source.permissions&&typeof source.permissions==="object") account.permissions=normalizePermissions(source.permissions,role,workType);
+        else account.permissions=(role!==previousRole||workType!==previousWorkType)?defaultPermissions(role,workType):normalizePermissions(account.permissions,role,workType);
+        account.active=active;account.updatedAt=Date.now();
         if(password){account.passwordHash=await hashPassword(password);state.sessions=state.sessions.filter((session)=>session.accountId!==account.id);}
         if(!active)state.sessions=state.sessions.filter((session)=>session.accountId!==account.id);
         audit(state,actor,"Cập nhật tài khoản "+account.username+": "+role+(active?"":" · đã khóa"));return {ok:true,account:publicAccount(account)};
@@ -1309,7 +1368,7 @@ app.post("/api/store", async (req, res, next) => {
         audit(state,actor,"Đổi mật khẩu tài khoản");return {ok:true};
       }
       if (action === "upsertProduct") {
-        if (!canManage(actor.role)) return fail("Cần quyền Manager hoặc Admin",403);
+        const denied=requirePermission("editProducts","Sửa/xóa sản phẩm");if(denied)return denied;
         const source=body.product||{}, sku=asText(source.sku), name=asText(source.name),requestedId=asText(source.id);
         if (!sku || !name) return fail("SKU và tên sản phẩm là bắt buộc");
         const idIndex=requestedId?state.products.findIndex((item)=>item.id===requestedId):-1;
@@ -1325,7 +1384,7 @@ app.post("/api/store", async (req, res, next) => {
         audit(state,actor,"Lưu Master Data SKU "+sku); return {ok:true,id:product.id};
       }
       if (action === "deleteProduct") {
-        if (!canManage(actor.role)) return fail("Cần quyền Manager hoặc Admin",403);
+        const denied=requirePermission("editProducts","Sửa/xóa sản phẩm");if(denied)return denied;
         const index=state.products.findIndex((p)=>p.id===asText(body.id));
         if(index>=0){const [item]=state.products.splice(index,1);state.picking=state.picking.filter((p)=>p.productId!==item.id);state.manualChecks=state.manualChecks.filter((check)=>check.productId!==item.id);audit(state,actor,"Xóa sản phẩm SKU "+item.sku);} return {ok:true};
       }
@@ -1362,6 +1421,7 @@ app.post("/api/store", async (req, res, next) => {
         audit(state,actor,"Nhập "+auditLabel+" SKU "+product.sku);return {ok:true};
       }
       if(action==="upsertDailyReport"){
+        const denied=requirePermission("manageReports","Nhập/sửa/xóa báo cáo");if(denied)return denied;
         const source=body.report||{},report=Object.fromEntries(DAILY_REPORT_COLUMNS.map(([key])=>[key,asText(source[key]).slice(0,2000)]));
         report.phone=normalizePhone(source.phone);report.date=normalizeOrderDate(source.date,Date.now());report.invoiceValue=Math.max(0,asDecimal(source.invoiceValue));report.remainingInvoiceValue=Math.max(0,asDecimal(source.remainingInvoiceValue));
         if(report.phone.replace(/\D/g,"").length<8)return fail("Số điện thoại khách hàng cần ít nhất 8 chữ số");if(!report.customerName)return fail("Tên khách hàng là bắt buộc");if(!report.employeeName)return fail("Tên nhân viên là bắt buộc");
@@ -1406,7 +1466,7 @@ app.post("/api/store", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/customers/import", requireManager, upload.single("file"), async (req,res)=>{
+app.post("/api/customers/import", requirePermissionMiddleware("manageReports","Nhập/sửa/xóa báo cáo"), upload.single("file"), async (req,res)=>{
   if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel khách hàng .xlsx"});
   if(!req.file.originalname.toLowerCase().endsWith(".xlsx"))return res.status(400).json({error:"Chỉ hỗ trợ file Excel định dạng .xlsx"});
   try {
@@ -1423,7 +1483,7 @@ app.post("/api/customers/import", requireManager, upload.single("file"), async (
   }catch(error){res.status(400).json({error:error instanceof Error?error.message:"Không thể đọc file khách hàng"});}
 });
 
-app.post("/api/master-data/import", requireManager, requireImportCapacity, masterUpload.single("file"), async (req, res, next) => {
+app.post("/api/master-data/import", requirePermissionMiddleware("importData","Nhập dữ liệu Excel"), requireImportCapacity, masterUpload.single("file"), async (req, res, next) => {
   try {
     if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel .xlsx"});
     const removeUpload=()=>fs.unlink(req.file.path).catch(()=>undefined);
@@ -1449,7 +1509,7 @@ app.get("/api/master-data/import/:jobId",async(req,res,next)=>{
   } catch(error){next(error);}
 });
 
-app.post("/api/stock/import", requireManager, masterUpload.single("file"), async(req,res,next)=>{
+app.post("/api/stock/import", requirePermissionMiddleware("importData","Nhập dữ liệu Excel"), masterUpload.single("file"), async(req,res,next)=>{
   try {
     if(!req.file)return res.status(400).json({error:"Hãy chọn file Excel .xlsx"});
     const removeUpload=()=>fs.unlink(req.file.path).catch(()=>undefined);
@@ -1464,7 +1524,7 @@ app.get("/api/stock/import/:jobId",async(req,res,next)=>{
   try{const state=await store.read(),actor=actorFrom(req,state);if(!actor)return res.status(401).json({error:"Vui lòng đăng nhập"});const job=stockJobs.get(asText(req.params.jobId));if(!job)return res.status(404).json({error:"Không tìm thấy lần nhập Stock"});if(job.ownerId!==actor.userId&&actor.role!=="ADMIN")return res.status(403).json({error:"Bạn không có quyền xem lần nhập này"});res.set("Cache-Control","no-store").json(publicMasterJob(job));}catch(error){next(error);}
 });
 
-app.post("/api/cloudinary/upload", requireManager, upload.single("file"), async(req,res,next)=>{
+app.post("/api/cloudinary/upload", requirePermissionMiddleware("editProducts","Sửa/xóa sản phẩm"), upload.single("file"), async(req,res,next)=>{
   try {
     const cloudName=asText(process.env.CLOUDINARY_CLOUD_NAME),apiKey=asText(process.env.CLOUDINARY_API_KEY),apiSecret=asText(process.env.CLOUDINARY_API_SECRET);
     if(!cloudName||!apiKey||!apiSecret)return res.status(503).json({error:"Cloudinary chưa được cấu hình trên máy chủ"});
@@ -1522,7 +1582,7 @@ app.get("/api/pog", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post("/api/pog", requireManager, upload.fields([{name:"file",maxCount:1},{name:"shelfImage",maxCount:1}]), async (req, res, next) => {
+app.post("/api/pog", requirePermissionMiddleware("managePog","Tải/sửa POG"), upload.fields([{name:"file",maxCount:1},{name:"shelfImage",maxCount:1}]), async (req, res, next) => {
   try {
     const files=req.files||{},sourceFile=files.file?.[0],shelfFile=files.shelfImage?.[0];
     if(!sourceFile)return res.status(400).json({error:"Thiếu tệp"});
