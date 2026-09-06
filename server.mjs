@@ -660,6 +660,27 @@ async function openAiProductSuggestions(query, products) {
   } finally { clearTimeout(timeout); }
 }
 
+// When a deployment is switched from local JSON storage to PostgreSQL, keep
+// the existing identities and customer master instead of starting empty. The
+// migration is intentionally one-way and conservative: accounts are copied
+// only when the remote state has no accounts, and customer rows only when the
+// dedicated server table is empty.
+async function migrateLocalIdentityDataToPostgres() {
+  if(!pool||!existsSync(statePath))return {accounts:0,customers:0};
+  let local;
+  try { local=ensureStateShape(JSON.parse(await fs.readFile(statePath,"utf8"))); }
+  catch(error){console.warn("Không thể đọc dữ liệu local để chuyển lên PostgreSQL:",error instanceof Error?error.message:error);return {accounts:0,customers:0};}
+  const remoteResult=await pool.query("SELECT state FROM fulfillment_state WHERE id=TRUE FOR UPDATE");
+  if(!remoteResult.rows[0])return {accounts:0,customers:0};
+  const remote=ensureStateShape(remoteResult.rows[0].state),accountsToCopy=!remote.accounts.length?local.accounts:[],customerCount=Number((await pool.query("SELECT COUNT(*)::int AS count FROM fulfillment_customers")).rows[0]?.count)||0;
+  let accounts=0;
+  if(accountsToCopy.length){remote.accounts=accountsToCopy;await pool.query("UPDATE fulfillment_state SET state=$1::jsonb, updated_at=NOW() WHERE id=TRUE",[JSON.stringify(remote)]);accounts=accountsToCopy.length;}
+  let customers=0;
+  if(customerStorageReady&&customerCount===0&&local.customers.length){const result=await upsertPersistentCustomers(local.customers);customers=result.created+result.updated;}
+  if(accounts||customers)console.info(`Đã chuyển dữ liệu local lên PostgreSQL: ${accounts} tài khoản, ${customers} khách hàng.`);
+  return {accounts,customers};
+}
+
 class StateStore {
   queue = Promise.resolve();
   localState = null;
@@ -688,6 +709,8 @@ class StateStore {
         customerStorageReady=false;
         console.warn("Customer master table is unavailable; using durable fulfillment_state fallback:",error instanceof Error?error.message:error);
       }
+      try { await migrateLocalIdentityDataToPostgres(); }
+      catch(error) { console.warn("Không thể chuyển dữ liệu tài khoản/khách hàng local lên PostgreSQL:",error instanceof Error?error.message:error); }
       try {
         await pool.query("CREATE TABLE IF NOT EXISTS fulfillment_purchase_history (source_key TEXT PRIMARY KEY, period TEXT NOT NULL, phone TEXT NOT NULL, customer_name TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '', purchase_date TEXT NOT NULL, invoice_number TEXT NOT NULL DEFAULT '', invoice_value NUMERIC NOT NULL DEFAULT 0, products TEXT NOT NULL DEFAULT '', source_name TEXT NOT NULL DEFAULT '', source_row INTEGER NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL)");
         await pool.query("CREATE INDEX IF NOT EXISTS fulfillment_purchase_history_period_idx ON fulfillment_purchase_history (period)");
